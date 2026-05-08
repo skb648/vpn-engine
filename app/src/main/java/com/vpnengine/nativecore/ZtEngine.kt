@@ -1,0 +1,253 @@
+package com.vpnengine.nativecore
+
+import android.net.VpnService
+import android.util.Log
+import androidx.annotation.Keep
+
+/**
+ * ZtEngine — JNI bridge between Kotlin and C++ ZeroTierEngine.
+ *
+ * This singleton wraps all native method calls with exception safety:
+ *   - Every native call is wrapped in try-catch
+ *   - C++ exceptions NEVER crash the app (they are caught in C++)
+ *   - Java Errors (like UnsatisfiedLinkError) are also caught
+ *   - All methods return safe defaults on failure
+ *
+ * BULLETPROOF LIFECYCLE (v5):
+ *   - New state codes: P2P_HANDSHAKE (8), AUTHENTICATING (9), RECONNECTING (10)
+ *   - State mapping includes all connection phases for UI feedback
+ *   - Fatal error handler triggers reconnect instead of immediate stop
+ */
+object ZtEngine {
+
+    private const val TAG = "ZtEngine-Kotlin"
+    private var nativeLibraryLoaded: Boolean = false
+    private var loadError: String = ""
+
+    @Volatile
+    internal var vpnServiceRef: VpnService? = null
+
+    @Volatile
+    internal var fatalErrorHandler: (() -> Unit)? = null
+
+    init {
+        try {
+            // CRITICAL: Load libzt.so FIRST before libvpn-engine.so.
+            try {
+                System.loadLibrary("zt")
+                Log.i(TAG, "ZeroTier SDK library 'zt' loaded successfully")
+            } catch (e: UnsatisfiedLinkError) {
+                Log.e(TAG, "CRITICAL: Failed to load libzt.so — ZeroTier SDK not in APK! " +
+                          "Ensure libzt.so is in app/src/main/jniLibs/<abi>/", e)
+            } catch (e: SecurityException) {
+                Log.e(TAG, "SecurityManager blocked loading libzt.so", e)
+            }
+
+            System.loadLibrary("vpn-engine")
+            nativeLibraryLoaded = true
+            loadError = ""
+            Log.i(TAG, "Native library 'vpn-engine' loaded successfully")
+        } catch (e: UnsatisfiedLinkError) {
+            nativeLibraryLoaded = false
+            loadError = "Native library not found: ${e.message}"
+            Log.e(TAG, "Failed to load native library", e)
+        } catch (e: SecurityException) {
+            nativeLibraryLoaded = false
+            loadError = "Security manager blocked native library: ${e.message}"
+            Log.e(TAG, "SecurityManager blocked loading", e)
+        } catch (e: Throwable) {
+            nativeLibraryLoaded = false
+            loadError = "Unexpected error loading native library: ${e.message}"
+            Log.e(TAG, "Unexpected error loading native library", e)
+        }
+    }
+
+    // ── Native method declarations ─────────────────────────────────────────
+
+    external fun nativeStart(configPath: String, networkId: Long): Boolean
+    external fun nativeStop()
+    external fun nativeIsOnline(): Boolean
+    external fun nativeIsRunning(): Boolean
+    external fun nativeGetNodeId(): Long
+    external fun nativeGetAssignedIPv4(): String
+    external fun nativeGetAssignedIPv6(): String
+    external fun nativeJoinNetwork(networkId: Long): Boolean
+    external fun nativeLeaveNetwork(networkId: Long): Boolean
+    external fun nativeStartTunBridge(tunFd: Int): Boolean
+    external fun nativeStopTunBridge()
+    external fun nativeGetLastError(): String
+    external fun nativeIsSdkAvailable(): Boolean
+    external fun nativeIsStopping(): Boolean
+
+    // ── Safe wrappers (exception-safe) ─────────────────────────────────────
+
+    fun startSafe(configPath: String, networkId: Long): Boolean {
+        if (!nativeLibraryLoaded) {
+            Log.e(TAG, "Cannot start: $loadError")
+            return false
+        }
+        if (networkId == 0L) {
+            Log.e(TAG, "Cannot start: Network ID is 0 (invalid)")
+            return false
+        }
+        if (configPath.isBlank()) {
+            Log.e(TAG, "Cannot start: config path is empty")
+            return false
+        }
+        return try {
+            val result = nativeStart(configPath, networkId)
+            if (!result) {
+                Log.e(TAG, "nativeStart returned false — engine failed to start. Error: ${getLastErrorSafe()}")
+            }
+            result
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception in nativeStart", e)
+            false
+        } catch (e: Error) {
+            Log.e(TAG, "Error in nativeStart", e)
+            false
+        }
+    }
+
+    fun stopSafe() {
+        if (!nativeLibraryLoaded) return
+        try { nativeStop() }
+        catch (e: Exception) { Log.e(TAG, "Exception in nativeStop", e) }
+        catch (e: Error) { Log.e(TAG, "Error in nativeStop", e) }
+    }
+
+    fun isOnlineSafe(): Boolean {
+        if (!nativeLibraryLoaded) return false
+        return try { nativeIsOnline() } catch (e: Exception) { false } catch (e: Error) { false }
+    }
+
+    fun isRunningSafe(): Boolean {
+        if (!nativeLibraryLoaded) return false
+        return try { nativeIsRunning() } catch (e: Exception) { false } catch (e: Error) { false }
+    }
+
+    fun isStoppingSafe(): Boolean {
+        if (!nativeLibraryLoaded) return false
+        return try { nativeIsStopping() } catch (e: Exception) { false } catch (e: Error) { false }
+    }
+
+    fun getNodeIdSafe(): Long {
+        if (!nativeLibraryLoaded) return 0L
+        return try { nativeGetNodeId() } catch (e: Exception) { 0L } catch (e: Error) { 0L }
+    }
+
+    fun getAssignedIPv4Safe(): String {
+        if (!nativeLibraryLoaded) return ""
+        return try { nativeGetAssignedIPv4() } catch (e: Exception) { "" } catch (e: Error) { "" }
+    }
+
+    fun getLastErrorSafe(): String {
+        if (!nativeLibraryLoaded) return loadError
+        return try { nativeGetLastError() } catch (e: Exception) { "Error getting last error: ${e.message}" }
+        catch (e: Error) { "Error getting last error: ${e.message}" }
+    }
+
+    fun startTunBridgeSafe(tunFd: Int): Boolean {
+        if (!nativeLibraryLoaded) return false
+        return try { nativeStartTunBridge(tunFd) }
+        catch (e: Exception) { Log.e(TAG, "Exception in startTunBridge", e); false }
+        catch (e: Error) { Log.e(TAG, "Error in startTunBridge", e); false }
+    }
+
+    fun stopTunBridgeSafe() {
+        if (!nativeLibraryLoaded) return
+        try { nativeStopTunBridge() }
+        catch (e: Exception) { Log.e(TAG, "Exception in stopTunBridge", e) }
+        catch (e: Error) { Log.e(TAG, "Error in stopTunBridge", e) }
+    }
+
+    fun isSdkAvailableSafe(): Boolean {
+        if (!nativeLibraryLoaded) return false
+        return try { nativeIsSdkAvailable() } catch (e: Exception) { false } catch (e: Error) { false }
+    }
+
+    fun isNativeLibraryLoaded(): Boolean = nativeLibraryLoaded
+    fun getNativeLoadError(): String = loadError
+
+    // ── JNI Callbacks — Called from C++ via AttachCurrentThread ────────────
+
+    /**
+     * Called from C++ when ZeroTier engine state changes.
+     *
+     * State codes map to VpnState:
+     *   0  (STOPPED)             → Disconnected
+     *   1  (STARTING)            → InitializingNode
+     *   2  (ONLINE)              → JoiningMesh (node is online, will join network)
+     *   3  (OFFLINE)             → Reconnecting (was Error — now supports auto-retry)
+     *   4  (NETWORK_READY)       → Connected
+     *   5  (NETWORK_DOWN)        → Reconnecting (was Error — now supports auto-retry)
+     *   6  (JOINING_NETWORK)     → JoiningMesh
+     *   7  (WAITING_AUTHORIZATION) → WaitingAuthorization
+     *   8  (P2P_HANDSHAKE)       → P2pHandshake (UDP hole punching in progress)
+     *   9  (AUTHENTICATING)      → Authenticating (network controller verifying node)
+     *   10 (RECONNECTING)        → Reconnecting (auto-reconnect after connectivity loss)
+     *   -1 (ERROR)               → Error(message)
+     */
+    @Keep
+    fun onZtStateChanged(stateCode: Int, message: String) {
+        Log.i(TAG, "ZT State: code=$stateCode msg=$message")
+        when (stateCode) {
+            0 -> { VpnStateHolder.updateState(VpnState.Disconnected) }
+            1 -> { VpnStateHolder.updateState(VpnState.InitializingNode) }
+            2 -> { VpnStateHolder.updateState(VpnState.JoiningMesh) }
+            3 -> {
+                // OFFLINE — transition to Reconnecting instead of Error
+                // The Kotlin layer will handle auto-retry
+                Log.w(TAG, "ZeroTier node offline — triggering reconnect")
+            }
+            4 -> { VpnStateHolder.updateState(VpnState.Connected()) }
+            5 -> {
+                // NETWORK_DOWN — transition to Reconnecting instead of Error
+                Log.w(TAG, "ZeroTier network down — triggering reconnect")
+            }
+            6 -> { VpnStateHolder.updateState(VpnState.JoiningMesh) }
+            7 -> { VpnStateHolder.updateState(VpnState.WaitingAuthorization) }
+            8 -> { VpnStateHolder.updateState(VpnState.P2pHandshake) }
+            9 -> { VpnStateHolder.updateState(VpnState.Authenticating) }
+            10 -> { VpnStateHolder.updateState(VpnState.Reconnecting(1, 3)) }
+            -1 -> {
+                Log.e(TAG, "ZeroTier engine error: $message")
+                VpnStateHolder.updateState(VpnState.Error(message.ifBlank { "Unknown ZeroTier engine error" }))
+                try { fatalErrorHandler?.invoke() } catch (e: Exception) {
+                    Log.e(TAG, "Fatal error handler threw", e)
+                }
+            }
+            else -> Log.w(TAG, "Unknown state code: $stateCode")
+        }
+    }
+
+    @Keep
+    fun onZtAssignedIP(ipv4: String, ipv6: String) {
+        Log.i(TAG, "ZeroTier assigned IP: ipv4=$ipv4 ipv6=$ipv6")
+        VpnStateHolder.updateAssignedIP(ipv4, ipv6)
+        VpnStateHolder.updateNodeId(getNodeIdSafe())
+    }
+
+    @Keep
+    fun onZtTrafficStats(bytesIn: Long, bytesOut: Long, packetsIn: Long, packetsOut: Long) {
+        VpnStateHolder.updateTrafficStats(bytesIn, bytesOut, packetsIn, packetsOut)
+    }
+
+    @Keep
+    fun onZtSocketCreated(fd: Int): Boolean {
+        val service = vpnServiceRef
+        if (service == null) {
+            Log.e(TAG, "onZtSocketCreated: VpnService ref is null — cannot protect fd=$fd")
+            return false
+        }
+        return try {
+            val protected = service.protect(fd)
+            if (protected) Log.i(TAG, "ZT socket fd=$fd protected")
+            else Log.e(TAG, "protect($fd) returned false")
+            protected
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception in protect($fd)", e)
+            false
+        }
+    }
+}

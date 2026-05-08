@@ -1,0 +1,68 @@
+# ════════════════════════════════════════════════════════════════════════
+# .gitignore — VPN Engine Android Project
+# ════════════════════════════════════════════════════════════════════════
+
+# ── Built application files ──────────────────────────────────────────────
+*.apk
+*.ap_
+*.aab
+
+# ── Files for the ART/Dalvik VM ─────────────────────────────────────────
+*.dex
+
+# ── Java class files ────────────────────────────────────────────────────
+*.class
+
+# ── Generated files ─────────────────────────────────────────────────────
+bin/
+gen/
+out/
+
+# ── Gradle files ────────────────────────────────────────────────────────
+.gradle/
+build/
+app/build/
+
+# ── Local configuration file ────────────────────────────────────────────
+local.properties
+
+# ── Android Studio / IntelliJ ───────────────────────────────────────────
+.idea/
+*.iml
+*.iws
+*.ipr
+.navigation/
+captures/
+
+# ── Keystore files ──────────────────────────────────────────────────────
+*.jks
+*.keystore
+
+# ── Log Files ───────────────────────────────────────────────────────────
+*.log
+
+# ── Android Profiling ──────────────────────────────────────────────────
+*.hprof
+
+# ── External native build ──────────────────────────────────────────────
+.externalNativeBuild/
+.cxx/
+
+# ── OS-specific files ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── NDK build intermediates ─────────────────────────────────────────────
+obj/
+libs/
+
+# ── Project artifacts not needed in repo ────────────────────────────────
+download/
+skills/
+upload/
+apks/
+worklog.md
+BUILD_SUCCESS.md
+WORKLOG_UPDATE.md
+REFERENCE.md
+.env
