@@ -44,6 +44,8 @@ class VpnTunnelService : LifecycleService() {
         const val EXTRA_MODE = "vpn_mode"
 
         private const val TAG = "VpnTunnelService"
+        /** Public constant for notification channel ID (referenced by VpnNotificationHelper). */
+        const val NOTIFICATION_CHANNEL_ID = "vpn_channel_id"
         private const val NOTIFICATION_ID = 1
         private const val VPN_MTU = 1400
 
@@ -228,8 +230,8 @@ class VpnTunnelService : LifecycleService() {
                         Log.i(TAG, "Retrying network join (attempt $retryCount/$MAX_RETRY_ATTEMPTS) in ${delayMs}ms...")
                         VpnStateHolder.updateState(VpnState.Reconnecting)
                         delay(delayMs)
-                        ZtEngine.leaveNetwork(networkIdLong)
-                        ZtEngine.joinNetwork(networkIdLong)
+                        ZtEngine.leaveNetworkSafe(networkIdLong)
+                        ZtEngine.joinNetworkSafe(networkIdLong)
                         return@launch startVpn()
                     } else {
                         throw VpnException(
@@ -432,7 +434,7 @@ class VpnTunnelService : LifecycleService() {
     private fun getAssignedIPs(): List<String> {
         val ips = mutableListOf<String>()
         for (i in 0L until 32) {
-            val ip = ZtEngine.getAddress(i)
+            val ip = ZtEngine.getAddressSafe(i)
             if (ip.isNullOrBlank()) break
             try {
                 InetAddress.getByName(ip)

@@ -98,6 +98,32 @@ object ZtEngine {
     external fun nativeGetLastError(): String
     external fun nativeIsSdkAvailable(): Boolean
     external fun nativeIsStopping(): Boolean
+    external fun nativeProcessPacket(packet: java.nio.ByteBuffer, length: Int): Int
+    external fun nativeReadPacket(buffer: java.nio.ByteBuffer, capacity: Int): Int
+
+    // Functions that may not be present in the native library — provide stubs
+    /**
+     * Join a ZeroTier network. May be handled internally by nativeStart.
+     */
+    private external fun nativeJoinNetwork(networkId: Long): Boolean
+
+    /**
+     * Leave a ZeroTier network.
+     */
+    private external fun nativeLeaveNetwork(networkId: Long): Boolean
+
+    /**
+     * Get an assigned IP address by index.
+     * @param index The address index (0-31).
+     * @return IP string or null if no address at this index.
+     */
+    private external fun nativeGetAddress(index: Long): String?
+
+    /**
+     * Connect to a TCP target via ZeroTier.
+     * Used by SOCKS5 proxy for outbound connections.
+     */
+    private external fun nativeZtsTcpConnect(destIP: String, destPort: Int): Int
 
     // ── Safe wrappers (exception-safe) ─────────────────────────────────────
 
@@ -188,6 +214,51 @@ object ZtEngine {
 
     fun isNativeLibraryLoaded(): Boolean = nativeLibraryLoaded
     fun getNativeLoadError(): String = loadError
+
+    // ── Additional safe wrappers for VpnTunnelService ──────────────────────
+
+    fun joinNetworkSafe(networkId: Long): Boolean {
+        if (!nativeLibraryLoaded) return false
+        return try { nativeJoinNetwork(networkId) }
+        catch (e: Exception) { Log.e(TAG, "joinNetwork failed", e); false }
+        catch (e: Error) { Log.e(TAG, "joinNetwork error", e); false }
+    }
+
+    fun leaveNetworkSafe(networkId: Long): Boolean {
+        if (!nativeLibraryLoaded) return false
+        return try { nativeLeaveNetwork(networkId) }
+        catch (e: Exception) { Log.e(TAG, "leaveNetwork failed", e); false }
+        catch (e: Error) { Log.e(TAG, "leaveNetwork error", e); false }
+    }
+
+    fun getAddressSafe(index: Long): String? {
+        if (!nativeLibraryLoaded) return null
+        return try {
+            val addr = nativeGetAddress(index)
+            if (addr.isNullOrBlank()) null else addr
+        } catch (e: Exception) { null } catch (e: Error) { null }
+    }
+
+    fun processPacket(packet: java.nio.ByteBuffer, length: Int): Int {
+        if (!nativeLibraryLoaded) return -1
+        return try { nativeProcessPacket(packet, length) }
+        catch (e: Exception) { Log.e(TAG, "processPacket failed", e); -1 }
+        catch (e: Error) { Log.e(TAG, "processPacket error", e); -1 }
+    }
+
+    fun readPacket(buffer: java.nio.ByteBuffer, capacity: Int): Int {
+        if (!nativeLibraryLoaded) return 0
+        return try { nativeReadPacket(buffer, capacity) }
+        catch (e: Exception) { Log.e(TAG, "readPacket failed", e); 0 }
+        catch (e: Error) { Log.e(TAG, "readPacket error", e); 0 }
+    }
+
+    fun ztsTcpConnect(destIP: String, destPort: Int): Int {
+        if (!nativeLibraryLoaded) return -1
+        return try { nativeZtsTcpConnect(destIP, destPort) }
+        catch (e: Exception) { Log.e(TAG, "ztsTcpConnect failed", e); -1 }
+        catch (e: Error) { Log.e(TAG, "ztsTcpConnect error", e); -1 }
+    }
 
     // ══════════════════════════════════════════════════════════════════════
     // CRITICAL FIX: BigInteger helpers for safe Network ID conversion.
