@@ -501,31 +501,45 @@ JNI_OnLoad(JavaVM* vm, void* /* reserved */)
         env->ExceptionClear();
     }
 
-    // Cache ZtEngine.INSTANCE global reference
-    jfieldID instanceField = env->GetStaticFieldID(ztEngineClass,
-        "INSTANCE", "Lcom/vpnengine/nativecore/ZtEngine;");
-    if (!instanceField) {
-        LOG_W("ZtEngine.INSTANCE field not found");
-        env->ExceptionClear();
-        return JNI_VERSION_1_6;
-    }
+    // CRITICAL FIX: Don't cache ZtEngine.INSTANCE here because this creates
+    // a race condition. ZtEngine is a Kotlin object (singleton) and its
+    // init block loads this native library, which triggers JNI_OnLoad.
+    // During init block execution, INSTANCE is not yet fully constructed.
+    //
+    // Instead, we use a two-phase initialization:
+    //   Phase 1 (here): Cache JVM and method IDs
+    //   Phase 2 (nativeInit): Set the callback object via explicit call
+    //
+    // This avoids the circular dependency between class loading and
+    // native library loading.
 
-    jobject instance = env->GetStaticObjectField(ztEngineClass, instanceField);
-    if (!instance) {
-        LOG_W("ZtEngine.INSTANCE is null");
-        return JNI_VERSION_1_6;
-    }
-
-    g_callbackObj = env->NewGlobalRef(instance);
-    if (!g_callbackObj) {
-        LOG_E("NewGlobalRef failed for ZtEngine.INSTANCE");
-        return JNI_VERSION_1_6;
-    }
-
-    env->DeleteLocalRef(instance);
-
-    LOG_I("JNI_OnLoad complete — all ZT callbacks initialized");
+    LOG_I("JNI_OnLoad complete — Phase 1 done (JVM + method IDs cached). "
+          "Phase 2 (callback obj) will happen on first native call.");
     return JNI_VERSION_1_6;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// nativeInit — Phase 2: Set the callback object after Kotlin object is ready
+// ══════════════════════════════════════════════════════════════════════════════
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_vpnengine_nativecore_ZtEngine_nativeInit(
+        JNIEnv* env, jobject thiz)
+{
+    std::lock_guard<std::mutex> lock(g_callbackMutex);
+
+    // Clean up old reference if any
+    if (g_callbackObj) {
+        env->DeleteGlobalRef(g_callbackObj);
+        g_callbackObj = nullptr;
+    }
+
+    g_callbackObj = env->NewGlobalRef(thiz);
+    if (g_callbackObj) {
+        LOG_I("nativeInit: Callback object set successfully");
+    } else {
+        LOG_E("nativeInit: NewGlobalRef failed — callbacks will not work!");
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL

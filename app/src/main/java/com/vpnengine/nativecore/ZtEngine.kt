@@ -3,6 +3,7 @@ package com.vpnengine.nativecore
 import android.net.VpnService
 import android.util.Log
 import androidx.annotation.Keep
+import java.math.BigInteger
 
 /**
  * ZtEngine — JNI bridge between Kotlin and C++ ZeroTierEngine.
@@ -47,6 +48,18 @@ object ZtEngine {
             nativeLibraryLoaded = true
             loadError = ""
             Log.i(TAG, "Native library 'vpn-engine' loaded successfully")
+
+            // CRITICAL FIX: Two-phase initialization to avoid race condition.
+            // JNI_OnLoad cannot safely access ZtEngine.INSTANCE because this
+            // init block is still running. We complete callback setup here.
+            try {
+                nativeInit()
+                Log.i(TAG, "Native callback initialization complete (two-phase init)")
+            } catch (e: Exception) {
+                Log.e(TAG, "nativeInit failed — callbacks may not work", e)
+            } catch (e: Error) {
+                Log.e(TAG, "nativeInit error — callbacks may not work", e)
+            }
         } catch (e: UnsatisfiedLinkError) {
             nativeLibraryLoaded = false
             loadError = "Native library not found: ${e.message}"
@@ -63,6 +76,13 @@ object ZtEngine {
     }
 
     // ── Native method declarations ─────────────────────────────────────────
+
+    /**
+     * Phase 2 initialization — set the callback object reference.
+     * CRITICAL: This MUST be called after the Kotlin object is fully
+     * constructed to avoid the race condition in JNI_OnLoad.
+     */
+    external fun nativeInit()
 
     external fun nativeStart(configPath: String, networkId: Long): Boolean
     external fun nativeStop()
@@ -168,6 +188,33 @@ object ZtEngine {
 
     fun isNativeLibraryLoaded(): Boolean = nativeLibraryLoaded
     fun getNativeLoadError(): String = loadError
+
+    // ══════════════════════════════════════════════════════════════════════
+    // CRITICAL FIX: BigInteger helpers for safe Network ID conversion.
+    // ZeroTier network IDs are 64-bit unsigned, but Java/Kotlin Long is
+    // signed. When a 16-char hex value exceeds Long.MAX_VALUE (e.g.,
+    // starts with 8-F), toLong() returns a negative number. The JNI
+    // C++ layer interprets this as the correct unsigned 64-bit value.
+    // ══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Convert a BigInteger Network ID to the signed Long expected by JNI.
+     * For values > Long.MAX_VALUE, this returns a negative Long which
+     * JNI interprets as the correct unsigned 64-bit value.
+     */
+    fun bigIntToNetworkId(value: BigInteger): Long {
+        return value.toLong()
+    }
+
+    /**
+     * Convert a signed Long (from JNI) back to an unsigned BigInteger
+     * for proper display as a 16-char hex string.
+     */
+    fun networkIdToBigInt(value: Long): BigInteger {
+        return BigInteger.valueOf(value).let {
+            if (it.signum() < 0) it.add(BigInteger.ONE.shiftLeft(64)) else it
+        }
+    }
 
     // ── JNI Callbacks — Called from C++ via AttachCurrentThread ────────────
 

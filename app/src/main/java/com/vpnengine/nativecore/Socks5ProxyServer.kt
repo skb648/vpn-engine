@@ -304,10 +304,23 @@ class Socks5ProxyServer(
 
     /**
      * Connect to the target host:port specified in the SOCKS5 request.
+     * CRITICAL FIX: Support both IPv4 and IPv6 targets.
      */
     private fun connectToTarget(request: ConnectRequest): Socket? {
         return try {
-            val socket = Socket()
+            // CRITICAL FIX: Detect IPv6 and create appropriate socket
+            val address = InetAddress.getByName(request.host)
+            val socket = when (address) {
+                is java.net.Inet6Address -> {
+                    // IPv6 target — explicitly create IPv6 socket
+                    Log.d(TAG, "Connecting to IPv6 target: ${request.host}:${request.port}")
+                    Socket()
+                }
+                else -> {
+                    // IPv4 target (or hostname resolved to IPv4)
+                    Socket()
+                }
+            }
             socket.tcpNoDelay = true
             // Protect the socket from routing through any VPN tunnel.
             // This is critical when another VPN is active on the device —

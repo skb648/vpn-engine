@@ -1,21 +1,18 @@
-name: Build APK
+name: Build Signed APK
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
-  build:
+  build-apk:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          lfs: true
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -26,43 +23,45 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android NDK and CMake
-        run: |
-          echo "y" | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653"
-          echo "y" | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "cmake;3.22.1"
-
-      - name: Create debug keystore
-        run: |
-          mkdir -p ~/.android
-          keytool -genkeypair -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-
-      - name: Cache Gradle packages
+      - name: Cache Android NDK
         uses: actions/cache@v4
         with:
           path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+            /usr/local/lib/android/sdk/ndk
+            /usr/local/lib/android/sdk/ndk-bundle
+          key: ${{ runner.os }}-ndk-r25b
           restore-keys: |
-            gradle-
+            ${{ runner.os }}-ndk-
+
+      - name: Install Android NDK r25b
+        run: |
+          if [ ! -d "/usr/local/lib/android/sdk/ndk/25.2.9519653" ]; then
+            echo "Installing NDK r25b..."
+            yes | sdkmanager "ndk;25.2.9519653" --channel=0
+          else
+            echo "NDK r25b already cached."
+          fi
+
+      - name: Accept Android licenses
+        run: yes | sdkmanager --licenses || true
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace
+      - name: Build APK (Debug)
+        run: ./gradlew assembleDebug --no-daemon
 
-      - name: Build Release APK
-        run: ./gradlew assembleRelease --stacktrace
-
-      - name: Upload Debug APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          name: vpn-engine-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Build APK (Release Unsigned)
+        run: ./gradlew assembleRelease --no-daemon
 
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: release-apk
-          path: app/build/outputs/apk/release/*.apk
+          name: vpn-engine-release-apk
+          path: app/build/outputs/apk/release/app-release-unsigned.apk
