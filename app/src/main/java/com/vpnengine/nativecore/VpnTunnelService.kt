@@ -56,9 +56,8 @@ class VpnTunnelService : AndroidVpnService() {
         const val ACTION_STOP = "com.vpnengine.nativecore.ACTION_STOP"
         /** CRITICAL FIX: Network ID now passed as String to prevent Long overflow */
         const val EXTRA_NETWORK_ID_STRING = "com.vpnengine.nativecore.EXTRA_NETWORK_ID_STRING"
-        /** Public constant for notification channel ID */
-        const val NOTIFICATION_CHANNEL_ID = "vpn_channel_id"
         const val EXTRA_MODE = "com.vpnengine.nativecore.EXTRA_MODE"
+        /** Public constant for notification channel ID */
         const val NOTIFICATION_CHANNEL_ID = "vpn_tunnel_channel"
         const val NOTIFICATION_ID = 1001
     }
