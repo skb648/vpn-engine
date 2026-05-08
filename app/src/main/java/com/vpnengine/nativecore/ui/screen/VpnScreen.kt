@@ -416,14 +416,14 @@ fun AuthStatusDisplay(
     ) return
 
     val (bgColor, textColor, icon) = when (authStatus) {
-        is AuthorizationStatus.Authorized ->
-            Color(0xFF059669).copy(alpha = 0.15f) to Color(0xFF34D399) to Icons.Rounded.CheckCircle
-        is AuthorizationStatus.NotAuthorized ->
-            Color(0xFFDC2626).copy(alpha = 0.15f) to Color(0xFFF87171) to Icons.Rounded.Error
-        is AuthorizationStatus.Pending ->
-            Color(0xFFD97706).copy(alpha = 0.15f) to Color(0xFFFBBF24) to Icons.Rounded.HourglassTop
-        is AuthorizationStatus.Error ->
-            Color(0xFF6B7280).copy(alpha = 0.15f) to Color(0xFF9CA3AF) to Icons.Rounded.Info
+        is AuthorizationStatus.Authorized -> Triple(
+            Color(0xFF059669).copy(alpha = 0.15f), Color(0xFF34D399), Icons.Rounded.CheckCircle)
+        is AuthorizationStatus.NotAuthorized -> Triple(
+            Color(0xFFDC2626).copy(alpha = 0.15f), Color(0xFFF87171), Icons.Rounded.Error)
+        is AuthorizationStatus.Pending -> Triple(
+            Color(0xFFD97706).copy(alpha = 0.15f), Color(0xFFFBBF24), Icons.Rounded.HourglassTop)
+        is AuthorizationStatus.Error -> Triple(
+            Color(0xFF6B7280).copy(alpha = 0.15f), Color(0xFF9CA3AF), Icons.Rounded.Info)
     }
 
     Spacer(modifier = Modifier.height(8.dp))

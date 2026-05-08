@@ -461,45 +461,8 @@ static ZeroTierEngine* getEngine() {
 // Additional JNI Functions (PRODUCTION FIX: missing function implementations)
 // ══════════════════════════════════════════════════════════════════════════════
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_vpnengine_nativecore_ZtEngine_nativeJoinNetwork(
-        JNIEnv* /*env*/, jobject /*thiz*/, jlong networkId)
-{
-    auto* engine = getEngine();
-    if (!engine) {
-        LOG_W("nativeJoinNetwork: Engine is null");
-        return JNI_FALSE;
-    }
-    try {
-        bool result = engine->joinNetwork(static_cast<uint64_t>(networkId));
-        LOG_I("nativeJoinNetwork: networkId=%llx result=%s",
-              static_cast<long long>(networkId), result ? "true" : "false");
-        return result ? JNI_TRUE : JNI_FALSE;
-    } catch (const std::exception& e) {
-        LOG_E("nativeJoinNetwork exception: %s", e.what());
-        return JNI_FALSE;
-    }
-}
-
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_vpnengine_nativecore_ZtEngine_nativeLeaveNetwork(
-        JNIEnv* /*env*/, jobject /*thiz*/, jlong networkId)
-{
-    auto* engine = getEngine();
-    if (!engine) {
-        LOG_W("nativeLeaveNetwork: Engine is null");
-        return JNI_FALSE;
-    }
-    try {
-        bool result = engine->leaveNetwork(static_cast<uint64_t>(networkId));
-        LOG_I("nativeLeaveNetwork: networkId=%llx result=%s",
-              static_cast<long long>(networkId), result ? "true" : "false");
-        return result ? JNI_TRUE : JNI_FALSE;
-    } catch (const std::exception& e) {
-        LOG_E("nativeLeaveNetwork exception: %s", e.what());
-        return JNI_FALSE;
-    }
-}
+// Note: nativeJoinNetwork and nativeLeaveNetwork are already defined above
+// at lines 363-387. Do NOT add duplicates here.
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_vpnengine_nativecore_ZtEngine_nativeGetAddress(

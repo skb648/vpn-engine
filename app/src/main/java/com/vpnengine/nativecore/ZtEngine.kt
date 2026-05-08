@@ -100,30 +100,11 @@ object ZtEngine {
     external fun nativeIsStopping(): Boolean
     external fun nativeProcessPacket(packet: java.nio.ByteBuffer, length: Int): Int
     external fun nativeReadPacket(buffer: java.nio.ByteBuffer, capacity: Int): Int
+    external fun nativeGetAddress(index: Long): String?
+    external fun nativeZtsTcpConnect(destIP: String, destPort: Int): Int
 
-    // Functions that may not be present in the native library — provide stubs
-    /**
-     * Join a ZeroTier network. May be handled internally by nativeStart.
-     */
-    private external fun nativeJoinNetwork(networkId: Long): Boolean
-
-    /**
-     * Leave a ZeroTier network.
-     */
-    private external fun nativeLeaveNetwork(networkId: Long): Boolean
-
-    /**
-     * Get an assigned IP address by index.
-     * @param index The address index (0-31).
-     * @return IP string or null if no address at this index.
-     */
-    private external fun nativeGetAddress(index: Long): String?
-
-    /**
-     * Connect to a TCP target via ZeroTier.
-     * Used by SOCKS5 proxy for outbound connections.
-     */
-    private external fun nativeZtsTcpConnect(destIP: String, destPort: Int): Int
+    // Note: nativeJoinNetwork and nativeLeaveNetwork are already declared
+    // in the native library via native-lib.cpp lines 363-387.
 
     // ── Safe wrappers (exception-safe) ─────────────────────────────────────
 
