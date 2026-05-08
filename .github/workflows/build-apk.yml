@@ -1,4 +1,18 @@
-name: Build Signed APK
+# ══════════════════════════════════════════════════════════════════════════════
+# GitHub Actions Workflow — Build VPN Engine APK (Debug + Release)
+#
+# This workflow builds both debug and release APKs for the ZT P2P Mesh VPN app.
+# It handles:
+#   - JDK 17 setup (required for AGP 8.2+)
+#   - Android SDK with API 36 (compileSdk/targetSdk)
+#   - NDK r25b (25.2.9519653) for native C++ builds
+#   - CMake 3.22.1+ for native library compilation
+#   - Debug keystore generation for CI signing
+#   - Gradle caching for faster subsequent builds
+#   - Artifact upload for both debug and release APKs
+# ══════════════════════════════════════════════════════════════════════════════
+
+name: Build APK
 
 on:
   push:
@@ -7,61 +21,188 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+# Cancel in-progress runs for the same branch
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build-apk:
+  build:
+    name: Build APKs
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+
     steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
 
+      # ── 2. JDK 17 ───────────────────────────────────────────────────────
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
 
+      # ── 3. Android SDK ──────────────────────────────────────────────────
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Cache Android NDK
+      # ── 4. Install required SDK components ───────────────────────────────
+      # API 36 platform, build-tools, NDK r25b, CMake, and platform-tools
+      - name: Install SDK components
+        run: |
+          echo "Installing Android SDK components..."
+
+          # Accept all licenses first
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+
+          # Install platform & build-tools for API 36
+          sdkmanager --install "platforms;android-36" 2>&1 || true
+          sdkmanager --install "build-tools;36.0.0" 2>&1 || true
+
+          # If API 36 platform is not available yet, try 35
+          if [ ! -d "${ANDROID_HOME}/platforms/android-36" ]; then
+            echo "API 36 platform not available, installing API 35 as fallback..."
+            sdkmanager --install "platforms;android-35" 2>&1 || true
+            sdkmanager --install "build-tools;35.0.1" 2>&1 || true
+          fi
+
+          # Install NDK r25b (25.2.9519653)
+          echo "Installing NDK r25b..."
+          sdkmanager --install "ndk;25.2.9519653" 2>&1 || true
+
+          # Install CMake (3.22.1+ required by project)
+          echo "Installing CMake..."
+          sdkmanager --install "cmake;3.22.1" 2>&1 || true
+
+          # Install platform-tools
+          sdkmanager --install "platform-tools" 2>&1 || true
+
+          # Verify installations
+          echo ""
+          echo "=== SDK Verification ==="
+          echo "ANDROID_HOME: ${ANDROID_HOME}"
+          echo "NDK version installed:"
+          ls -la ${ANDROID_HOME}/ndk/ 2>/dev/null || echo "NDK directory not found at expected location"
+          echo "CMake installed:"
+          ls -la ${ANDROID_HOME}/cmake/ 2>/dev/null || echo "CMake directory not found at expected location"
+          echo "Platforms installed:"
+          ls ${ANDROID_HOME}/platforms/ 2>/dev/null || echo "No platforms found"
+          echo "Build-tools installed:"
+          ls ${ANDROID_HOME}/build-tools/ 2>/dev/null || echo "No build-tools found"
+
+      # ── 5. Cache Gradle ─────────────────────────────────────────────────
+      - name: Cache Gradle packages
         uses: actions/cache@v4
         with:
           path: |
-            /usr/local/lib/android/sdk/ndk
-            /usr/local/lib/android/sdk/ndk-bundle
-          key: ${{ runner.os }}-ndk-r25b
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: |
-            ${{ runner.os }}-ndk-
+            gradle-${{ runner.os }}-
 
-      - name: Install Android NDK r25b
+      # ── 6. Generate debug keystore for CI ───────────────────────────────
+      - name: Generate debug keystore
         run: |
-          if [ ! -d "/usr/local/lib/android/sdk/ndk/25.2.9519653" ]; then
-            echo "Installing NDK r25b..."
-            yes | sdkmanager "ndk;25.2.9519653" --channel=0
+          mkdir -p ~/.android
+          if [ ! -f ~/.android/debug.keystore ]; then
+            keytool -genkeypair \
+              -v \
+              -keystore ~/.android/debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            echo "Debug keystore created."
           else
-            echo "NDK r25b already cached."
+            echo "Debug keystore already exists."
           fi
 
-      - name: Accept Android licenses
-        run: yes | sdkmanager --licenses || true
-
+      # ── 7. Grant execute permission ─────────────────────────────────────
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Build APK (Debug)
-        run: ./gradlew assembleDebug --no-daemon
+      # ── 8. Build Debug APK ──────────────────────────────────────────────
+      - name: Build Debug APK
+        run: |
+          echo "Building debug APK..."
+          ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee build-debug.log
+          echo ""
+          echo "=== Debug APK Output ==="
+          find app/build/outputs/apk/debug/ -name "*.apk" -exec ls -lh {} \; 2>/dev/null || echo "No debug APK found"
 
-      - name: Upload APK
+      # ── 9. Upload Debug APK ─────────────────────────────────────────────
+      - name: Upload Debug APK
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: vpn-engine-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 30
 
-      - name: Build APK (Release Unsigned)
-        run: ./gradlew assembleRelease --no-daemon
+      # ── 10. Build Release APK ───────────────────────────────────────────
+      # The build.gradle falls back to debug signing if no release keystore is configured
+      - name: Build Release APK
+        run: |
+          echo "Building release APK (signed with debug keystore fallback)..."
+          ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tee build-release.log
+          echo ""
+          echo "=== Release APK Output ==="
+          find app/build/outputs/apk/release/ -name "*.apk" -exec ls -lh {} \; 2>/dev/null || echo "No release APK found"
 
+      # ── 11. Upload Release APK ──────────────────────────────────────────
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: vpn-engine-release-apk
-          path: app/build/outputs/apk/release/app-release-unsigned.apk
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 30
+
+      # ── 12. Build Summary ───────────────────────────────────────────────
+      - name: Build Summary
+        if: always()
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Artifact | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          if ls app/build/outputs/apk/debug/*.apk 1>/dev/null 2>&1; then
+            APK_SIZE=$(du -h app/build/outputs/apk/debug/*.apk | cut -f1)
+            echo "| Debug APK | ✅ Built ($APK_SIZE) |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Debug APK | ❌ Failed |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if ls app/build/outputs/apk/release/*.apk 1>/dev/null 2>&1; then
+            APK_SIZE=$(du -h app/build/outputs/apk/release/*.apk | cut -f1)
+            echo "| Release APK | ✅ Built ($APK_SIZE) |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Release APK | ❌ Failed |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Build Logs" >> $GITHUB_STEP_SUMMARY
+          echo "- [Debug build log](#)" >> $GITHUB_STEP_SUMMARY
+          echo "- [Release build log](#)" >> $GITHUB_STEP_SUMMARY
+
+      # ── 13. Upload build logs on failure ─────────────────────────────────
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build-debug.log
+            build-release.log
+            app/build/reports/
+          retention-days: 7
