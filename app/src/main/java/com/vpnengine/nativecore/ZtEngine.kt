@@ -308,7 +308,7 @@ object ZtEngine {
             7 -> { VpnStateHolder.updateState(VpnState.WaitingAuthorization) }
             8 -> { VpnStateHolder.updateState(VpnState.P2pHandshake) }
             9 -> { VpnStateHolder.updateState(VpnState.Authenticating) }
-            10 -> { VpnStateHolder.updateState(VpnState.Reconnecting(1, 3)) }
+            10 -> { VpnStateHolder.updateState(VpnState.Reconnecting(1, 5)) }
             -1 -> {
                 Log.e(TAG, "ZeroTier engine error: $message")
                 VpnStateHolder.updateState(VpnState.Error(message.ifBlank { "Unknown ZeroTier engine error" }))

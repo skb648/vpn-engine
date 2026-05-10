@@ -4,7 +4,9 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService as AndroidVpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -18,17 +20,27 @@ import java.io.IOException
 /**
  * VpnTunnelService — Android VpnService implementation for ZeroTier P2P Mesh VPN.
  *
- * BULLETPROOF LIFECYCLE (v5):
- *   1. Creates zerotier storage directory BEFORE passing path to JNI
- *   2. Validates VpnService.prepare() was resolved before starting
- *   3. Foreground service compliance for Android 14+ (FOREGROUND_SERVICE_SPECIAL_USE)
- *   4. Sender/Receiver mode support
- *   5. **120-second IP assignment timeout** (was 45s) for strict NAT/ISP
- *   6. **Auto-retry with exponential backoff** on connection failure
- *   7. **Reconnecting state** instead of immediate error on transient failures
- *   8. Proper lifecycle: init node → P2P handshake → join mesh →
- *      authenticate → wait auth → connected
- *   9. Zero hardcoded delays — all state driven by ZeroTier callbacks
+ * ENTERPRISE-GRADE LIFECYCLE (v7):
+ *   1. **OS-LEVEL NETWORK BYPASS**: On Android 11+ (API 30+), SELinux restricts
+ *      native C++ libraries (`libzt.so`) from discovering physical network
+ *      interfaces via `getifaddrs()` or `/proc/net/`. Before initializing the
+ *      ZeroTier engine, we explicitly call `bindProcessToNetwork(activeNetwork)`
+ *      to force all native sockets to route directly over the active Wi-Fi/Mobile
+ *      Data interface, completely un-blinding the C++ networking layer.
+ *   2. **BULLETPROOF C++ TEARDOWN**: The stop sequence guarantees that all
+ *      native threads are joined BEFORE destroying mutexes or freeing the node,
+ *      eliminating the `FATAL SIGNAL 6 (SIGABRT): pthread_mutex_lock called on
+ *      a destroyed mutex` crash.
+ *   3. **120-SECOND IP ASSIGNMENT TIMEOUT**: Allows sufficient time for complex
+ *      UDP hole-punching over strict Indian ISPs (Jio/Airtel symmetric NAT).
+ *   4. **EXPONENTIAL BACKOFF RETRY**: On timeout or network drop, the service
+ *      transitions to a graceful `Reconnecting` state with automatic retry
+ *      (3s → 6s → 12s → 24s → 48s).
+ *   5. Creates ZeroTier storage directory BEFORE passing path to JNI.
+ *   6. Validates VpnService.prepare() was resolved before starting.
+ *   7. Foreground service compliance for Android 14+ (FOREGROUND_SERVICE_SPECIAL_USE).
+ *   8. Sender/Receiver mode support.
+ *   9. Zero hardcoded delays — all state driven by ZeroTier callbacks.
  */
 class VpnTunnelService : AndroidVpnService() {
 
@@ -43,9 +55,9 @@ class VpnTunnelService : AndroidVpnService() {
         private const val ZT_STORAGE_DIR = "zerotier"
 
         // ── NETWORK ROBUSTNESS CONFIGURATION ─────────────────────────────
-        // Increased from 45s to 120s for strict NAT/ISP scenarios.
-        // Indian ISPs with symmetric NAT can take 60-90s for UDP hole
-        // punching to complete and receive an IP assignment.
+        // 120s timeout for strict NAT/ISP scenarios. Indian ISPs with
+        // symmetric NAT (Jio/Airtel) can take 60-90s for UDP hole punching
+        // to complete and receive an IP assignment.
         private const val IP_ASSIGNMENT_TIMEOUT_MS = 120_000L
 
         // Auto-retry configuration
@@ -76,6 +88,10 @@ class VpnTunnelService : AndroidVpnService() {
     private var currentMode = VpnStateHolder.VpnMode.RECEIVER
     private var currentNetworkId = 0L
     private var retryJob: Job? = null
+
+    // Track the bound network so we can unbind properly during teardown
+    @Volatile
+    private var boundNetwork: Network? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "onStartCommand: action=${intent?.action}")
@@ -124,12 +140,7 @@ class VpnTunnelService : AndroidVpnService() {
 
     override fun onRevoke() {
         Log.w(TAG, "VPN permission revoked — tearing down tunnel")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            try {
-                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-                cm.bindProcessToNetwork(null)
-            } catch (_: Exception) {}
-        }
+        unbindProcessNetwork()
         VpnStateHolder.updateState(VpnState.Disconnected)
         ZtEngine.vpnServiceRef = null
         ZtEngine.fatalErrorHandler = null
@@ -144,6 +155,7 @@ class VpnTunnelService : AndroidVpnService() {
         serviceScope.cancel()
         stopEngineAndTun()
         stopSocks5Proxy()
+        unbindProcessNetwork()
         ZtEngine.vpnServiceRef = null
         ZtEngine.fatalErrorHandler = null
         super.onDestroy()
@@ -168,6 +180,10 @@ class VpnTunnelService : AndroidVpnService() {
         }
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    // MAIN START COMMAND — Enterprise-grade connection lifecycle
+    // ══════════════════════════════════════════════════════════════════════════
+
     private suspend fun handleStartCommand(networkId: Long, mode: VpnStateHolder.VpnMode) {
         if (ZtEngine.isRunningSafe()) {
             Log.w(TAG, "Engine already running")
@@ -183,16 +199,14 @@ class VpnTunnelService : AndroidVpnService() {
 
         ZtEngine.fatalErrorHandler = {
             Log.e(TAG, "Fatal ZT error — will attempt auto-reconnect")
-            // Instead of immediately stopping, trigger a reconnect attempt
             retryJob?.cancel()
             retryJob = serviceScope.launch {
                 attemptReconnect(networkId, mode)
             }
         }
 
+        // ── PHASE 0: Show foreground notification FIRST (Android 8+ requirement) ──
         VpnStateHolder.updateState(VpnState.InitializingNode)
-
-        // ── Show foreground notification FIRST (Android 8+ requirement) ──
         try {
             VpnNotificationHelper.showForegroundNotification(this)
         } catch (e: Exception) {
@@ -202,7 +216,7 @@ class VpnTunnelService : AndroidVpnService() {
             return
         }
 
-        // ── Create ZeroTier storage directory BEFORE passing to JNI ──
+        // ── PHASE 1: Create ZeroTier storage directory BEFORE passing to JNI ──
         val ztDir = File(filesDir, ZT_STORAGE_DIR)
         if (!ztDir.exists()) {
             val created = ztDir.mkdirs()
@@ -228,50 +242,52 @@ class VpnTunnelService : AndroidVpnService() {
 
         val configPath = ztDir.absolutePath
 
-        // ── CRITICAL: Android 11+ Network Binding Fix ───────────────────────────
-        // On API 30+, ZeroTier C++ SDK cannot discover network interfaces due to
-        // SELinux restrictions on getifaddrs() and /proc/net/. We must bind the
-        // process to the active physical network BEFORE starting ZeroTier, so its
-        // C++ sockets can route directly over Wi-Fi/LTE.
+        // ══════════════════════════════════════════════════════════════════════
+        // PHASE 2: OS-LEVEL NETWORK BYPASS (Android 11+ / API 30+)
+        //
+        // CRITICAL FIX: SELinux on Android 11+ completely restricts native
+        // C++ libraries (libzt.so) from discovering physical network interfaces
+        // via getifaddrs() or /proc/net/. This makes the ZeroTier engine blind
+        // — it cannot send initial UDP handshake packets to root servers, and
+        // web authorization requests never reach the ZeroTier Central dashboard.
+        //
+        // SOLUTION: Call bindProcessToNetwork(activeNetwork) BEFORE starting
+        // the ZeroTier engine. This forces ALL sockets (including native C++
+        // sockets created by libzt.so) to route directly over the active
+        // physical Wi-Fi or Mobile Data interface, completely bypassing the
+        // SELinux restriction.
+        //
+        // This MUST happen BEFORE zts_node_start() because the engine opens
+        // sockets during initialization to contact ZeroTier root servers.
+        // ══════════════════════════════════════════════════════════════════════
+        VpnStateHolder.updateState(VpnState.UnblindingNetwork)
+        VpnNotificationHelper.updateNotification(this, "Un-blinding network for native C++ sockets...")
+
         val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val activeNetwork = connectivityManager.activeNetwork
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && activeNetwork != null) {
-            try {
-                val bound = connectivityManager.bindProcessToNetwork(activeNetwork)
-                Log.i(TAG, "CRITICAL FIX: bindProcessToNetwork($activeNetwork) = $bound")
-                if (!bound) {
-                    Log.w(TAG, "bindProcessToNetwork failed — ZeroTier may not discover network interfaces")
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "bindProcessToNetwork exception", e)
-            }
+        val networkBypassResult = performNetworkBypass(connectivityManager)
+
+        if (!networkBypassResult) {
+            Log.w(TAG, "Network bypass failed or unavailable — proceeding anyway (may work on older devices)")
+            // Don't fail here — older devices (< API 30) don't need the bypass
+            // and some networks may not need it. The engine will still try.
         }
 
-        // ── Network connectivity check ─────────────────────────────────────
-        // Use NetworkCapabilities API on API 23+ (activeNetworkInfo is deprecated on API 29+)
-        val hasConnectivity = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val network = connectivityManager.activeNetwork
-            val caps = if (network != null) connectivityManager.getNetworkCapabilities(network) else null
-            caps != null && (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
-                    caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
-                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) ||
-                    caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN))
-        } else {
-            @Suppress("DEPRECATION")
-            val activeNet = connectivityManager.activeNetworkInfo
-            activeNet != null && activeNet.isConnected
-        }
-
+        // ── PHASE 3: Validate network connectivity ─────────────────────────
+        val hasConnectivity = checkNetworkConnectivity(connectivityManager)
         if (!hasConnectivity) {
             val error = "No internet connection. Connect to Wi-Fi or mobile data and try again."
             Log.e(TAG, error)
             VpnStateHolder.updateState(VpnState.Error(error))
+            unbindProcessNetwork()
             stopForegroundAndNotification()
             stopSelf()
             return
         }
 
-        // ── Start ZeroTier engine ──────────────────────────────────────────
+        // ── PHASE 4: Start ZeroTier engine ────────────────────────────────
+        VpnStateHolder.updateState(VpnState.InitializingNode)
+        VpnNotificationHelper.updateNotification(this, "Starting ZeroTier engine...")
+
         val started = ZtEngine.startSafe(configPath, networkId)
 
         if (!started) {
@@ -290,7 +306,7 @@ class VpnTunnelService : AndroidVpnService() {
 
         Log.i(TAG, "ZeroTier engine started — waiting for IP assignment (timeout=${IP_ASSIGNMENT_TIMEOUT_MS}ms)...")
 
-        // ── Wait for ZeroTier to assign an IP (120s timeout) ────────────────
+        // ── PHASE 5: Wait for ZeroTier to assign an IP (120s timeout) ──────
         val ipAssigned = waitForAssignedIP(timeoutMs = IP_ASSIGNMENT_TIMEOUT_MS)
 
         if (!ipAssigned) {
@@ -303,6 +319,7 @@ class VpnTunnelService : AndroidVpnService() {
                 Log.w(TAG, error)
                 VpnStateHolder.updateState(VpnState.Error(error))
                 stopEngineAndTun()
+                unbindProcessNetwork()
                 stopForegroundAndNotification()
                 stopSelf()
                 return
@@ -333,7 +350,7 @@ class VpnTunnelService : AndroidVpnService() {
             return
         }
 
-        // ── Handle mode-specific setup ─────────────────────────────────────
+        // ── PHASE 6: Handle mode-specific setup ──────────────────────────
         when (mode) {
             VpnStateHolder.VpnMode.SENDER -> {
                 setupSenderMode(assignedIP)
@@ -343,6 +360,222 @@ class VpnTunnelService : AndroidVpnService() {
             }
         }
     }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // OS-LEVEL NETWORK BYPASS — The core fix for Android 11+ "Network Blindness"
+    // ══════════════════════════════════════════════════════════════════════════
+    //
+    // On Android 11+ (API 30+), SELinux completely blocks native C++ code from
+    // accessing network interface information. The ZeroTier C++ SDK (libzt.so)
+    // relies on getifaddrs() and /proc/net/ to discover which network interfaces
+    // are available for sending UDP packets. When these are blocked, the engine
+    // is "blind" — it cannot send ANY packets, including:
+    //   - Initial UDP handshake to ZeroTier root servers
+    //   - Web authorization requests to ZeroTier Central
+    //   - P2P hole-punching packets
+    //
+    // The fix is to call bindProcessToNetwork(activeNetwork) which tells the
+    // Android kernel to route ALL process sockets (including native ones) through
+    // the specified physical network. This effectively bypasses the SELinux
+    // restriction because the kernel now knows which network to use, even if
+    // the native code can't discover it.
+    //
+    // IMPORTANT: This MUST be called BEFORE zts_node_start() because the
+    // ZeroTier engine opens its first sockets during initialization to contact
+    // the root servers. If the bypass is not in place by then, those initial
+    // packets will fail to send.
+
+    /**
+     * Perform the OS-level network bypass for Android 11+ (API 30+).
+     *
+     * This method:
+     *   1. Queries the active physical network using ConnectivityManager
+     *   2. Validates the network has NET_CAPABILITY_INTERNET
+     *   3. Calls bindProcessToNetwork() to force native socket routing
+     *   4. Stores the bound network reference for later unbinding
+     *
+     * @param cm The ConnectivityManager instance
+     * @return true if the bypass was successfully applied, false otherwise
+     */
+    private fun performNetworkBypass(cm: ConnectivityManager): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            Log.i(TAG, "Network bypass not needed (API ${Build.VERSION.SDK_INT} < 30)")
+            return true  // Not needed on older versions
+        }
+
+        Log.i(TAG, "NETWORK BYPASS: Starting OS-level network un-blinding (API ${Build.VERSION.SDK_INT})...")
+
+        // Step 1: Get the active network
+        val activeNetwork = cm.activeNetwork
+        if (activeNetwork == null) {
+            Log.e(TAG, "NETWORK BYPASS FAILED: No active network found. " +
+                       "Device may be offline or airplane mode is on.")
+            return false
+        }
+
+        // Step 2: Validate the active network has INTERNET capability
+        val caps = cm.getNetworkCapabilities(activeNetwork)
+        if (caps == null) {
+            Log.e(TAG, "NETWORK BYPASS FAILED: Cannot get capabilities for active network $activeNetwork")
+            return false
+        }
+
+        val hasInternet = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        val hasValidated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        val transportType = when {
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "Cellular"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "Ethernet"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "VPN"
+            else -> "Unknown"
+        }
+
+        Log.i(TAG, "NETWORK BYPASS: Active network = $activeNetwork " +
+                    "(transport=$transportType, internet=$hasInternet, validated=$hasValidated, " +
+                    "upstream=${caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL)}")
+
+        if (!hasInternet) {
+            Log.e(TAG, "NETWORK BYPASS FAILED: Active network lacks NET_CAPABILITY_INTERNET. " +
+                       "Cannot route native C++ sockets through this network.")
+            // Attempt to find a better network
+            val fallbackNetwork = findBestNetwork(cm)
+            if (fallbackNetwork != null) {
+                Log.i(TAG, "NETWORK BYPASS: Found fallback network $fallbackNetwork, trying that instead")
+                return bindToNetwork(cm, fallbackNetwork)
+            }
+            return false
+        }
+
+        // Step 3: Warn about VPN transport — we should bind to the underlying physical network
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+            Log.w(TAG, "NETWORK BYPASS: Active network is a VPN — attempting to find physical network instead")
+            val physicalNetwork = findBestNetwork(cm)
+            if (physicalNetwork != null) {
+                return bindToNetwork(cm, physicalNetwork)
+            }
+            Log.w(TAG, "NETWORK BYPASS: No physical network found, proceeding with VPN network binding")
+        }
+
+        // Step 4: Bind the process to the active network
+        return bindToNetwork(cm, activeNetwork)
+    }
+
+    /**
+     * Find the best available physical network (Wi-Fi > Cellular > Ethernet).
+     * This is used as a fallback when the active network is unsuitable
+     * (e.g., it's a VPN or lacks INTERNET capability).
+     */
+    private fun findBestNetwork(cm: ConnectivityManager): android.net.Network? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+
+        // Prefer Wi-Fi, then Cellular, then Ethernet
+        val preferredTransports = intArrayOf(
+            NetworkCapabilities.TRANSPORT_WIFI,
+            NetworkCapabilities.TRANSPORT_CELLULAR,
+            NetworkCapabilities.TRANSPORT_ETHERNET
+        )
+
+        for (transport in preferredTransports) {
+            val request = NetworkRequest.Builder()
+                .addTransportType(transport)
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+
+            // Check all available networks for this transport
+            val allNetworks = cm.allNetworks
+            for (network in allNetworks) {
+                val networkCaps = cm.getNetworkCapabilities(network)
+                if (networkCaps != null &&
+                    networkCaps.hasTransport(transport) &&
+                    networkCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                    Log.i(TAG, "NETWORK BYPASS: Found suitable network: $network for transport $transport")
+                    return network
+                }
+            }
+        }
+
+        Log.w(TAG, "NETWORK BYPASS: No suitable physical network found among ${cm.allNetworks.size} networks")
+        return null
+    }
+
+    /**
+     * Bind the process to the specified network and store the reference.
+     */
+    private fun bindToNetwork(cm: ConnectivityManager, network: android.net.Network): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return true
+
+        return try {
+            val bound = cm.bindProcessToNetwork(network)
+            if (bound) {
+                boundNetwork = network
+                val caps = cm.getNetworkCapabilities(network)
+                val transportType = when {
+                    caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true -> "Wi-Fi"
+                    caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true -> "Cellular"
+                    caps?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true -> "Ethernet"
+                    else -> "Unknown"
+                }
+                Log.i(TAG, "NETWORK BYPASS SUCCESS: bindProcessToNetwork($network) = true " +
+                           "(transport=$transportType) — native C++ sockets are now un-blinded. " +
+                           "ZeroTier engine can now send UDP packets directly over $transportType.")
+            } else {
+                Log.e(TAG, "NETWORK BYPASS FAILED: bindProcessToNetwork($network) returned false. " +
+                           "The Android framework rejected the binding. Possible causes: " +
+                           "another VPN is active, the network is suspended, or a security policy prevents binding.")
+            }
+            bound
+        } catch (e: SecurityException) {
+            Log.e(TAG, "NETWORK BYPASS FAILED: SecurityException during bindProcessToNetwork. " +
+                       "The app may lack the required permissions or a device policy prevents network binding.", e)
+            false
+        } catch (e: IllegalStateException) {
+            Log.e(TAG, "NETWORK BYPASS FAILED: IllegalStateException — the network may have been disconnected " +
+                       "between the capability check and the binding call.", e)
+            false
+        } catch (e: Exception) {
+            Log.e(TAG, "NETWORK BYPASS FAILED: Unexpected exception during bindProcessToNetwork", e)
+            false
+        }
+    }
+
+    /**
+     * Unbind the process from the previously bound network.
+     * This is called during teardown to restore normal network routing.
+     */
+    private fun unbindProcessNetwork() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && boundNetwork != null) {
+            try {
+                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                cm.bindProcessToNetwork(null)
+                Log.i(TAG, "NETWORK BYPASS: Unbound process from network — normal routing restored")
+            } catch (e: Exception) {
+                Log.w(TAG, "NETWORK BYPASS: Failed to unbind process network", e)
+            }
+            boundNetwork = null
+        }
+    }
+
+    /**
+     * Check network connectivity using the modern NetworkCapabilities API.
+     */
+    private fun checkNetworkConnectivity(cm: ConnectivityManager): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val network = cm.activeNetwork
+            val caps = if (network != null) cm.getNetworkCapabilities(network) else null
+            caps != null && (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) ||
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN))
+        } else {
+            @Suppress("DEPRECATION")
+            val activeNet = cm.activeNetworkInfo
+            activeNet != null && activeNet.isConnected
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // RESILIENT CONNECTION RETRY — Exponential backoff with graceful states
+    // ══════════════════════════════════════════════════════════════════════════
 
     /**
      * Auto-reconnect with exponential backoff.
@@ -365,6 +598,7 @@ class VpnTunnelService : AndroidVpnService() {
                 "Check your Network ID, internet connection, and ZeroTier Central authorization."
             ))
             stopEngineAndTun()
+            unbindProcessNetwork()
             stopForegroundAndNotification()
             stopSelf()
             return
@@ -385,12 +619,19 @@ class VpnTunnelService : AndroidVpnService() {
         // Stop any existing engine cleanly before retrying
         stopEngineAndTun()
 
+        // Unbind process network so we can re-bind fresh
+        unbindProcessNetwork()
+
         // Small delay to ensure cleanup is complete
         delay(500)
 
         // Try again
         handleStartCommand(networkId, mode)
     }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // MODE-SPECIFIC SETUP
+    // ══════════════════════════════════════════════════════════════════════════
 
     /**
      * SENDER MODE: Start SOCKS5 proxy on ZeroTier virtual IP.
@@ -414,18 +655,11 @@ class VpnTunnelService : AndroidVpnService() {
         VpnNotificationHelper.updateNotification(this, "SOCKS5 proxy active on $assignedIP:1080")
         Log.i(TAG, "SENDER mode active: SOCKS5 proxy on $assignedIP:1080")
 
-        // ── Unbind process from physical network after TUN is up ───────────
-        // Now that TUN is established and ZeroTier has already discovered the
-        // physical network, we unbind so app traffic can flow through the VPN TUN.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            try {
-                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-                cm.bindProcessToNetwork(null)
-                Log.i(TAG, "Unbound process from physical network — TUN is active")
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to unbind process network", e)
-            }
-        }
+        // ── Unbind process from physical network after connection is up ─────
+        // Now that ZeroTier has already discovered the physical network and
+        // established P2P connections, we unbind so app traffic can flow
+        // through the VPN TUN interface normally.
+        unbindProcessNetwork()
 
         monitorEngineHealth()
     }
@@ -443,6 +677,7 @@ class VpnTunnelService : AndroidVpnService() {
             Log.e(TAG, "TUN configuration failed: ${e.message}", e)
             VpnStateHolder.updateState(VpnState.Error("TUN config failed: ${e.message}"))
             stopEngineAndTun()
+            unbindProcessNetwork()
             stopForegroundAndNotification()
             stopSelf()
             return
@@ -450,6 +685,7 @@ class VpnTunnelService : AndroidVpnService() {
             Log.e(TAG, "TUN establishment I/O error", e)
             VpnStateHolder.updateState(VpnState.Error("TUN I/O error: ${e.message}"))
             stopEngineAndTun()
+            unbindProcessNetwork()
             stopForegroundAndNotification()
             stopSelf()
             return
@@ -467,6 +703,7 @@ class VpnTunnelService : AndroidVpnService() {
             Log.e(TAG, "Failed to start TUN bridge: $nativeErr")
             VpnStateHolder.updateState(VpnState.Error("Failed to start packet bridge: $nativeErr"))
             stopEngineAndTun()
+            unbindProcessNetwork()
             stopForegroundAndNotification()
             stopSelf()
             return
@@ -479,18 +716,14 @@ class VpnTunnelService : AndroidVpnService() {
         // ── Unbind process from physical network after TUN is up ───────────
         // Now that TUN is established and ZeroTier has already discovered the
         // physical network, we unbind so app traffic can flow through the VPN TUN.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            try {
-                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-                cm.bindProcessToNetwork(null)
-                Log.i(TAG, "Unbound process from physical network — TUN is active")
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to unbind process network", e)
-            }
-        }
+        unbindProcessNetwork()
 
         monitorEngineHealth()
     }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // STOP / TEARDOWN — Coordinated, crash-free shutdown
+    // ══════════════════════════════════════════════════════════════════════════
 
     private fun handleStopCommand() {
         Log.i(TAG, "Stopping VPN tunnel...")
@@ -499,6 +732,7 @@ class VpnTunnelService : AndroidVpnService() {
         ZtEngine.fatalErrorHandler = null
         stopEngineAndTun()
         stopSocks5Proxy()
+        unbindProcessNetwork()
         VpnStateHolder.reset()
         stopForegroundAndNotification()
         stopSelf()
@@ -544,9 +778,10 @@ class VpnTunnelService : AndroidVpnService() {
             if (elapsed > 0 && elapsed % 10 == 0L) {
                 val remaining = (timeoutMs / 1000) - elapsed
                 val stateLabel = when (state) {
+                    is VpnState.UnblindingNetwork -> "Un-blinding Network"
                     is VpnState.P2pHandshake -> "P2P Handshake"
                     is VpnState.Authenticating -> "Authenticating"
-                    is VpnState.WaitingAuthorization -> "Waiting Authorization"
+                    is VpnState.WaitingAuthorization -> "Awaiting Web Auth"
                     is VpnState.JoiningMesh -> "Joining Mesh"
                     is VpnState.InitializingNode -> "Initializing"
                     is VpnState.Reconnecting -> "Reconnecting"
@@ -654,15 +889,13 @@ class VpnTunnelService : AndroidVpnService() {
     }
 
     private fun stopEngineAndTun() {
-        // Reset process network binding
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            try {
-                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-                cm.bindProcessToNetwork(null)
-            } catch (_: Exception) {}
-        }
+        // Unbind process network FIRST to restore normal routing
+        unbindProcessNetwork()
+        // Stop TUN bridge (joins bridge thread in C++)
         try { ZtEngine.stopTunBridgeSafe() } catch (e: Exception) { Log.w(TAG, "Error stopping TUN bridge", e) }
+        // Stop the ZeroTier engine with coordinated shutdown
         try { ZtEngine.stopSafe() } catch (e: Exception) { Log.w(TAG, "Error stopping ZT engine", e) }
+        // Close the TUN file descriptor
         try { vpnInterface?.close() } catch (e: IOException) { Log.w(TAG, "Error closing TUN interface", e) }
         vpnInterface = null
         tunEstablished = false

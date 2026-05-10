@@ -4,11 +4,11 @@ package com.vpnengine.nativecore
  * VpnState — Sealed interface representing the VPN connection lifecycle.
  *
  * State progression follows the ZeroTier node lifecycle:
- *   Disconnected → InitializingNode → P2pHandshake → JoiningMesh →
- *   Authenticating → WaitingAuthorization → Connected
+ *   Disconnected → UnblindingNetwork → InitializingNode → P2pHandshake →
+ *   JoiningMesh → Authenticating → WaitingAuthorization → Connected
  *
  * On connectivity loss:
- *   Connected → Reconnecting → (auto-retry) → JoiningMesh → Connected
+ *   Connected → Reconnecting → (auto-retry) → UnblindingNetwork → Connected
  *
  * The UI CANNOT show "Connected" unless the C++ engine confirms
  * ZTS_EVENT_NETWORK_READY_IP4 (state code 4). Zero dummy delays.
@@ -18,6 +18,15 @@ sealed interface VpnState {
 
     /** VPN is disconnected. Idle state. */
     object Disconnected : VpnState
+
+    /**
+     * OS-level network bypass in progress.
+     * On Android 11+ (API 30+), SELinux restricts native C++ libraries from
+     * discovering physical network interfaces. This state represents the
+     * bindProcessToNetwork() call that un-blinds the native sockets,
+     * forcing raw UDP packets to route directly over Wi-Fi/Mobile Data.
+     */
+    object UnblindingNetwork : VpnState
 
     /** General connecting state (fallback). Prefer specific stages for UI feedback. */
     object Connecting : VpnState
@@ -59,7 +68,7 @@ sealed interface VpnState {
      * @param attempt Current retry attempt number (1-based).
      * @param maxAttempts Maximum number of retries before giving up.
      */
-    data class Reconnecting(val attempt: Int, val maxAttempts: Int = 3) : VpnState
+    data class Reconnecting(val attempt: Int, val maxAttempts: Int = 5) : VpnState
 
     /**
      * An error occurred after all retries exhausted. The engine is

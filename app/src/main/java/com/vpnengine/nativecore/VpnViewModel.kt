@@ -185,6 +185,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setMode(mode: VpnStateHolder.VpnMode) {
         if (_vpnState.value is VpnState.Connected || _vpnState.value is VpnState.Connecting
+            || _vpnState.value is VpnState.UnblindingNetwork
             || _vpnState.value is VpnState.InitializingNode || _vpnState.value is VpnState.P2pHandshake
             || _vpnState.value is VpnState.JoiningMesh || _vpnState.value is VpnState.Authenticating
             || _vpnState.value is VpnState.WaitingAuthorization || _vpnState.value is VpnState.Reconnecting) {
@@ -471,6 +472,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                         // Don't interfere with the reconnecting process
                     }
                     is VpnState.InitializingNode,
+                    is VpnState.UnblindingNetwork,
                     is VpnState.P2pHandshake,
                     is VpnState.JoiningMesh,
                     is VpnState.Authenticating,

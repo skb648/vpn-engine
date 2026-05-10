@@ -12,6 +12,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.*
@@ -179,31 +180,28 @@ fun VpnScreen(
                         }
                         Spacer(modifier = Modifier.height(8.dp))
 
-                        Box(
-                            modifier = Modifier
-                                .combinedClickable(
-                                    onClick = { /* no-op */ },
-                                    onLongClick = {
-                                        if (ztNodeId != "Tap Connect to Generate...") {
-                                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
-                                                    as ClipboardManager
-                                            val clip = ClipData.newPlainText("ZeroTier Node ID", ztNodeId)
-                                            clipboard.setPrimaryClip(clip)
-                                            nodeIdCopied = true
-                                        }
-                                    }
-                                )
-                                .padding(8.dp)
-                        ) {
+                        SelectionContainer {
                             Text(
                                 text = ztNodeId,
-                                style = MaterialTheme.typography.headlineSmall.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 18.sp
-                                ),
                                 color = Color.White,
-                                textAlign = TextAlign.Center
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 18.sp,
+                                fontFamily = FontFamily.Monospace,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier
+                                    .combinedClickable(
+                                        onClick = { /* no-op */ },
+                                        onLongClick = {
+                                            if (ztNodeId != "Tap Connect to Generate...") {
+                                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                                                        as ClipboardManager
+                                                val clip = ClipData.newPlainText("ZeroTier Node ID", ztNodeId)
+                                                clipboard.setPrimaryClip(clip)
+                                                nodeIdCopied = true
+                                            }
+                                        }
+                                    )
+                                    .padding(8.dp)
                             )
                         }
 
@@ -314,6 +312,7 @@ fun VpnScreen(
                     onModeChange = { viewModel.setMode(it) },
                     isConnected = vpnState is VpnState.Connected ||
                             vpnState is VpnState.InitializingNode ||
+                            vpnState is VpnState.UnblindingNetwork ||
                             vpnState is VpnState.P2pHandshake ||
                             vpnState is VpnState.JoiningMesh ||
                             vpnState is VpnState.Authenticating ||
@@ -333,6 +332,7 @@ fun VpnScreen(
                             is VpnState.Connected -> viewModel.disconnect()
                             is VpnState.Connecting,
                             is VpnState.InitializingNode,
+                            is VpnState.UnblindingNetwork,
                             is VpnState.P2pHandshake,
                             is VpnState.JoiningMesh,
                             is VpnState.Authenticating,
@@ -575,6 +575,7 @@ fun P2PMeshToggle(
     val isConnected = vpnState is VpnState.Connected
     val isConnecting = vpnState is VpnState.Connecting ||
             vpnState is VpnState.InitializingNode ||
+            vpnState is VpnState.UnblindingNetwork ||
             vpnState is VpnState.P2pHandshake ||
             vpnState is VpnState.JoiningMesh ||
             vpnState is VpnState.Authenticating ||
@@ -585,6 +586,7 @@ fun P2PMeshToggle(
     val ringColor by animateColorAsState(
         targetValue = when (vpnState) {
             is VpnState.Connected -> CyberGreen
+            is VpnState.UnblindingNetwork -> Color(0xFF00BCD4)
             is VpnState.P2pHandshake -> Color(0xFF00BCD4)
             is VpnState.Authenticating -> Color(0xFFAB47BC)
             is VpnState.Connecting,
@@ -676,6 +678,7 @@ fun P2PMeshToggle(
                     imageVector = when (vpnState) {
                         is VpnState.Connected -> Icons.Rounded.Shield
                         is VpnState.InitializingNode -> Icons.Rounded.Settings
+                        is VpnState.UnblindingNetwork -> Icons.Rounded.Wifi
                         is VpnState.P2pHandshake -> Icons.Rounded.CompareArrows
                         is VpnState.JoiningMesh -> Icons.Rounded.Sync
                         is VpnState.Authenticating -> Icons.Rounded.VerifiedUser
@@ -689,6 +692,7 @@ fun P2PMeshToggle(
                     modifier = Modifier.size(52.dp),
                     tint = when (vpnState) {
                         is VpnState.Connected -> CyberGreen
+                        is VpnState.UnblindingNetwork -> Color(0xFF00BCD4)
                         is VpnState.P2pHandshake -> Color(0xFF00BCD4)
                         is VpnState.Authenticating -> Color(0xFFAB47BC)
                         is VpnState.Connecting,
@@ -738,6 +742,7 @@ fun StatusLabel(vpnState: VpnState) {
     val (text, color) = when (vpnState) {
         is VpnState.Disconnected -> "Tap to join mesh" to Color(0xFF6B7280)
         is VpnState.InitializingNode -> "Initializing ZeroTier node..." to CyberCyan
+        is VpnState.UnblindingNetwork -> "Un-blinding network for native C++ sockets..." to Color(0xFF00BCD4)
         is VpnState.P2pHandshake -> "P2P Handshake (UDP hole punching)..." to Color(0xFF00BCD4)
         is VpnState.JoiningMesh -> "Joining P2P mesh..." to CyberCyan
         is VpnState.Authenticating -> "Authenticating with network..." to Color(0xFFAB47BC)
@@ -786,6 +791,16 @@ fun StatusLabel(vpnState: VpnState) {
             text = "Authorize this node at my.zerotier.com",
             style = MaterialTheme.typography.bodySmall,
             color = Color(0xFFE5A000).copy(alpha = 0.7f),
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 32.dp)
+        )
+    }
+    if (vpnState is VpnState.UnblindingNetwork) {
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = "Disabling network blinding to enable native C++ socket access...",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFF00BCD4).copy(alpha = 0.7f),
             textAlign = TextAlign.Center,
             modifier = Modifier.padding(horizontal = 32.dp)
         )

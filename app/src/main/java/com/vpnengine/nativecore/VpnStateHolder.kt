@@ -12,7 +12,7 @@ import kotlinx.coroutines.flow.asStateFlow
  *   - VPN connection state (VpnState)
  *   - ZeroTier assigned IP addresses
  *   - Traffic statistics
- *   - Node ID
+ *   - Node ID (both Long from C++ and formatted 10-digit String from identity.public)
  *   - Operating mode (Sender / Receiver)
  *
  * Updated from C++ JNI callbacks and Kotlin service layer.
@@ -53,6 +53,17 @@ object VpnStateHolder {
     private val _nodeId = MutableStateFlow(0L)
     val nodeId: StateFlow<Long> = _nodeId.asStateFlow()
 
+    /**
+     * The 10-digit ZeroTier Node ID as a formatted string.
+     * This is populated from two sources:
+     *   1. The C++ engine callback (onZtAssignedIP) provides the Long value
+     *   2. The identity.public file provides a persistent string even before C++ starts
+     *
+     * Format: 10 lowercase hex characters (e.g., "a1b2c3d4e5")
+     */
+    private val _nodeIdString = MutableStateFlow("")
+    val nodeIdString: StateFlow<String> = _nodeIdString.asStateFlow()
+
     // ── Operating Mode ──────────────────────────────────────────────────────
 
     enum class VpnMode {
@@ -80,12 +91,6 @@ object VpnStateHolder {
 
     fun updateState(state: VpnState) {
         val prev = _vpnState.value
-        // BUG FIX: Always update state, even if the class is the same.
-        // Previously, two Error("msg1") and Error("msg2") would be considered
-        // equal by the `!=` check because data classes compare by properties.
-        // But two Error states with different messages should always be emitted.
-        // Also, re-emitting the same state (e.g., WaitingAuthorization) is
-        // important for UI feedback.
         Log.d(TAG, "State: $prev → $state")
         _vpnState.value = state
     }
@@ -102,6 +107,25 @@ object VpnStateHolder {
 
     fun updateNodeId(id: Long) {
         _nodeId.value = id
+        // Also update the string representation
+        if (id != 0L) {
+            val formatted = String.format(java.util.Locale.US, "%010x", id)
+            if (_nodeIdString.value != formatted) {
+                _nodeIdString.value = formatted
+                Log.d(TAG, "Node ID string updated: $formatted")
+            }
+        }
+    }
+
+    /**
+     * Update the Node ID string directly from the identity.public file.
+     * This provides a persistent Node ID even before the C++ engine is started.
+     */
+    fun updateNodeIdString(idString: String) {
+        if (idString.isNotBlank() && _nodeIdString.value != idString) {
+            _nodeIdString.value = idString
+            Log.d(TAG, "Node ID string from file: $idString")
+        }
     }
 
     fun updateMode(mode: VpnMode) {
@@ -124,6 +148,7 @@ object VpnStateHolder {
         _assignedIPv6.value = ""
         _trafficStats.value = TrafficStats()
         _nodeId.value = 0L
+        _nodeIdString.value = ""
         _socks5ProxyRunning.value = false
         _senderProxyAddress.value = ""
         _senderProxyPort.value = 1080
