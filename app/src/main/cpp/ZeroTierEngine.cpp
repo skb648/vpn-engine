@@ -1038,7 +1038,7 @@ void ZeroTierEngine::onZtEvent(void* msg) {
             break;
 
         case ZTS_EVENT_NODE_ONLINE: {
-            uint64_t nodeId = event->node->address;
+            uint64_t nodeId = zts_node_get_id();
             LOG_I("ZTS_EVENT_NODE_ONLINE — Node ID: %010" PRIx64, nodeId);
             engine->nodeId_.store(nodeId, std::memory_order_release);
             engine->online_.store(true, std::memory_order_release);
@@ -1072,12 +1072,12 @@ void ZeroTierEngine::onZtEvent(void* msg) {
             engine->online_.store(false, std::memory_order_release);
             break;
 
-        case ZTS_EVENT_NODE_IDENTITY_COLLISION:
-            LOG_W("ZTS_EVENT_NODE_IDENTITY_COLLISION — Identity collision detected");
+        case ZTS_EVENT_STORE_IDENTITY_PUBLIC:
+            LOG_D("ZTS_EVENT_STORE_IDENTITY_PUBLIC — Identity stored");
             break;
 
         case ZTS_EVENT_NETWORK_READY_IP4: {
-            uint64_t netId = event->network->nwid;
+            uint64_t netId = event->network->net_id;
             LOG_I("ZTS_EVENT_NETWORK_READY_IP4 — Network %016" PRIx64 " ready (IPv4)", netId);
 
             engine->networkReady_.store(true, std::memory_order_release);
@@ -1101,7 +1101,7 @@ void ZeroTierEngine::onZtEvent(void* msg) {
         }
 
         case ZTS_EVENT_NETWORK_READY_IP6: {
-            uint64_t netId = event->network->nwid;
+            uint64_t netId = event->network->net_id;
             LOG_I("ZTS_EVENT_NETWORK_READY_IP6 — Network %016" PRIx64 " ready (IPv6)", netId);
 
             std::string ipv6 = getZtIpAddress(netId, ZTS_AF_INET6);
@@ -1113,7 +1113,7 @@ void ZeroTierEngine::onZtEvent(void* msg) {
         }
 
         case ZTS_EVENT_NETWORK_DOWN: {
-            uint64_t netId = event->network->nwid;
+            uint64_t netId = event->network->net_id;
             LOG_W("ZTS_EVENT_NETWORK_DOWN — Network %016" PRIx64 " down", netId);
             engine->networkReady_.store(false, std::memory_order_release);
             engine->notifyState(ZtStateCode::NETWORK_DOWN, "Network went down");
@@ -1121,14 +1121,14 @@ void ZeroTierEngine::onZtEvent(void* msg) {
         }
 
         case ZTS_EVENT_NETWORK_UPDATE: {
-            uint64_t netId = event->network->nwid;
+            uint64_t netId = event->network->net_id;
             LOG_D("ZTS_EVENT_NETWORK_UPDATE — Network %016" PRIx64 " updated", netId);
             break;
         }
 
         // ── Network join/request lifecycle ──────────────────────────────
-        case ZTS_EVENT_NETWORK_REQUESTING_CONFIG: {
-            uint64_t netId = event->network->nwid;
+        case ZTS_EVENT_NETWORK_REQ_CONFIG: {
+            uint64_t netId = event->network->net_id;
             LOG_I("ZTS_EVENT_NETWORK_REQUESTING_CONFIG — Network %016" PRIx64, netId);
             engine->currentState_.store(ZtStateCode::AUTHENTICATING, std::memory_order_release);
             engine->notifyState(ZtStateCode::AUTHENTICATING, "Authenticating with network controller...");
@@ -1136,7 +1136,7 @@ void ZeroTierEngine::onZtEvent(void* msg) {
         }
 
         case ZTS_EVENT_NETWORK_OK: {
-            uint64_t netId = event->network->nwid;
+            uint64_t netId = event->network->net_id;
             LOG_I("ZTS_EVENT_NETWORK_OK — Network %016" PRIx64 " joined successfully", netId);
             engine->currentState_.store(ZtStateCode::WAITING_AUTHORIZATION, std::memory_order_release);
             engine->notifyState(ZtStateCode::WAITING_AUTHORIZATION,
@@ -1145,7 +1145,7 @@ void ZeroTierEngine::onZtEvent(void* msg) {
         }
 
         case ZTS_EVENT_NETWORK_ACCESS_DENIED: {
-            uint64_t netId = event->network->nwid;
+            uint64_t netId = event->network->net_id;
             LOG_E("ZTS_EVENT_NETWORK_ACCESS_DENIED — Network %016" PRIx64, netId);
             engine->notifyState(ZtStateCode::ERROR,
                                "Access denied by network controller. Authorize at my.zerotier.com");
@@ -1153,7 +1153,7 @@ void ZeroTierEngine::onZtEvent(void* msg) {
         }
 
         case ZTS_EVENT_NETWORK_NOT_FOUND: {
-            uint64_t netId = event->network->nwid;
+            uint64_t netId = event->network->net_id;
             LOG_E("ZTS_EVENT_NETWORK_NOT_FOUND — Network %016" PRIx64, netId);
             engine->notifyState(ZtStateCode::ERROR,
                                "Network not found. Check the 16-char Network ID.");
@@ -1171,31 +1171,13 @@ void ZeroTierEngine::onZtEvent(void* msg) {
             // Normal path lifecycle events
             break;
 
-        // ── Socket events (for VpnService.protect()) ────────────────────
-        case ZTS_EVENT_SOCKET_CREATED: {
-            int fd = event->socket->fd;
-            LOG_D("ZTS_EVENT_SOCKET_CREATED — fd=%d", fd);
-            bool protected_ = false;
-            {
-                std::lock_guard<std::mutex> lock(engine->callbackMutex_);
-                if (engine->socketProtectCallback_) {
-                    try {
-                        protected_ = engine->socketProtectCallback_(fd);
-                    } catch (...) {}
-                }
-            }
-            if (protected_) {
-                LOG_I("Socket fd=%d protected via VpnService.protect()", fd);
-            } else {
-                LOG_W("Socket fd=%d NOT protected — may cause routing loop", fd);
-            }
+        // ── Address events ────────────────────────────────────────────────
+        case ZTS_EVENT_ADDR_ADDED_IP4:
+        case ZTS_EVENT_ADDR_REMOVED_IP4:
+        case ZTS_EVENT_ADDR_ADDED_IP6:
+        case ZTS_EVENT_ADDR_REMOVED_IP6:
+            // Address assignment changes — handled by NETWORK_READY events
             break;
-        }
-
-        case ZTS_EVENT_SOCKET_CLOSED: {
-            LOG_D("ZTS_EVENT_SOCKET_CLOSED — fd=%d", event->socket->fd);
-            break;
-        }
 
         default:
             LOG_D("Unhandled ZT event: code=%d", event->event_code);
