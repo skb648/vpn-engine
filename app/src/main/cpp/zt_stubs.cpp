@@ -67,3 +67,12 @@ ssize_t zts_bsd_sendto(int, const void *, size_t, int, const struct zts_sockaddr
 ssize_t zts_bsd_recvfrom(int, void *, size_t, int, struct zts_sockaddr *, zts_socklen_t *) {
     return ZTS_ERR_SOCKET;
 }
+
+// ── Additional stubs for high-level socket API ──────────────────────────────
+// These are used by nativeZtsTcpConnect in native-lib.cpp
+int zts_socket(int, int, int) { return ZTS_ERR_SOCKET; }
+int zts_connect(int, const char *, unsigned short, int) { return ZTS_ERR_SOCKET; }
+int zts_close(int) { return ZTS_ERR_SOCKET; }
+
+// Global errno for ZeroTier SDK socket operations
+int zts_errno = 0;

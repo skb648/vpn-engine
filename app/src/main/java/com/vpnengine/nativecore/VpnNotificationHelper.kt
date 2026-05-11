@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.util.Log
+import com.vpnengine.nativecore.R
 
 /**
  * VpnNotificationHelper — Manages the foreground service notification
@@ -226,7 +227,7 @@ object VpnNotificationHelper {
         return builder
             .setContentTitle("VPN Tunnel")
             .setContentText(message)
-            .setSmallIcon(android.R.drawable.ic_lock_lock)  // System icon — replace with your own
+            .setSmallIcon(R.drawable.ic_vpn_notification)  // Custom VPN notification icon
             .setOngoing(true)          // User cannot swipe-dismiss
             .setShowWhen(false)        // Don't show timestamp
             .setCategory(Notification.CATEGORY_SERVICE)

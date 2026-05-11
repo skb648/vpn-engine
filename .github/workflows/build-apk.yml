@@ -4,7 +4,7 @@
 # This workflow builds both debug and release APKs for the ZT P2P Mesh VPN app.
 # It handles:
 #   - JDK 17 setup (required for AGP 8.2+)
-#   - Android SDK with API 36 (compileSdk/targetSdk)
+#   - Android SDK with API 35 (compileSdk/targetSdk fallback from 36)
 #   - NDK r25b (25.2.9519653) for native C++ builds
 #   - CMake 3.22.1+ for native library compilation
 #   - Debug keystore generation for CI signing
@@ -52,7 +52,7 @@ jobs:
         uses: android-actions/setup-android@v3
 
       # ── 4. Install required SDK components ───────────────────────────────
-      # API 36 platform, build-tools, NDK r25b, CMake, and platform-tools
+      # API 35 platform (stable), build-tools, NDK r25b, CMake, and platform-tools
       - name: Install SDK components
         run: |
           echo "Installing Android SDK components..."
@@ -60,16 +60,13 @@ jobs:
           # Accept all licenses first
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
 
-          # Install platform & build-tools for API 36
+          # Install platform & build-tools for API 35 (stable, widely available)
+          sdkmanager --install "platforms;android-35" 2>&1 || true
+          sdkmanager --install "build-tools;35.0.1" 2>&1 || true
+
+          # Also try API 36 in case it becomes available
           sdkmanager --install "platforms;android-36" 2>&1 || true
           sdkmanager --install "build-tools;36.0.0" 2>&1 || true
-
-          # If API 36 platform is not available yet, try 35
-          if [ ! -d "${ANDROID_HOME}/platforms/android-36" ]; then
-            echo "API 36 platform not available, installing API 35 as fallback..."
-            sdkmanager --install "platforms;android-35" 2>&1 || true
-            sdkmanager --install "build-tools;35.0.1" 2>&1 || true
-          fi
 
           # Install NDK r25b (25.2.9519653)
           echo "Installing NDK r25b..."

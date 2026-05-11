@@ -12,6 +12,7 @@
 # These are declared as 'external' in Kotlin and called from C++.
 # ProGuard must not remove or rename them.
 -keepclassmembers class com.vpnengine.nativecore.ZtEngine {
+    void nativeInit();
     boolean nativeStart(java.lang.String, long);
     void nativeStop();
     boolean nativeIsOnline();
@@ -25,6 +26,11 @@
     void nativeStopTunBridge();
     java.lang.String nativeGetLastError();
     boolean nativeIsSdkAvailable();
+    boolean nativeIsStopping();
+    int nativeProcessPacket(java.nio.ByteBuffer, int);
+    int nativeReadPacket(java.nio.ByteBuffer, int);
+    java.lang.String nativeGetAddress(long);
+    int nativeZtsTcpConnect(java.lang.String, int);
 }
 
 # ── Keep the ZtEngine singleton INSTANCE ────────────────────────────────────
@@ -69,3 +75,30 @@
 
 # ── Compose ─────────────────────────────────────────────────────────────────
 -dontwarn androidx.compose.**
+
+# ── Retrofit & OkHttp ─────────────────────────────────────────────────────────
+-dontwarn okhttp3.**
+-dontwarn okio.**
+-dontwarn retrofit2.**
+-keep class retrofit2.** { *; }
+-keepclassmembers,allowobfuscation interface * {
+    @retrofit2.http.* <methods>;
+}
+
+# ── Gson ──────────────────────────────────────────────────────────────────────
+-keepattributes Signature
+-keepattributes *Annotation*
+-keep class com.vpnengine.nativecore.NetworkInfo { *; }
+-keep class com.vpnengine.nativecore.NetworkConfig { *; }
+-keep class com.vpnengine.nativecore.NetworkMember { *; }
+-keep class com.vpnengine.nativecore.MemberConfig { *; }
+-keep class com.vpnengine.nativecore.AuthorizeMemberRequest { *; }
+-keep class com.vpnengine.nativecore.IpAssignmentPool { *; }
+-keep class com.vpnengine.nativecore.Route { *; }
+-keep class com.vpnengine.nativecore.Permission { *; }
+
+# ── AuthorizationStatus sealed class ──────────────────────────────────────────
+-keep class * implements com.vpnengine.nativecore.AuthorizationStatus { *; }
+
+# ── BuildConfig ───────────────────────────────────────────────────────────────
+-keep class com.vpnengine.nativecore.BuildConfig { *; }

@@ -655,11 +655,20 @@ class VpnTunnelService : AndroidVpnService() {
         VpnNotificationHelper.updateNotification(this, "SOCKS5 proxy active on $assignedIP:1080")
         Log.i(TAG, "SENDER mode active: SOCKS5 proxy on $assignedIP:1080")
 
-        // ── Unbind process from physical network after connection is up ─────
-        // Now that ZeroTier has already discovered the physical network and
-        // established P2P connections, we unbind so app traffic can flow
-        // through the VPN TUN interface normally.
-        unbindProcessNetwork()
+        // ── Do NOT unbind process from physical network ────────────────────
+        // CRITICAL FIX: We must KEEP bindProcessToNetwork active because the
+        // ZeroTier SDK (libzt.so) needs continuous access to the physical network
+        // to send/receive UDP packets for P2P mesh communication. Unbinding
+        // would break the ZeroTier connection entirely.
+        //
+        // The VPN app itself is excluded from the TUN interface via
+        // addDisallowedApplication(), so our UDP packets already bypass the
+        // VPN tunnel and go through the physical network. Other apps' traffic
+        // correctly routes through the TUN → ZeroTier → internet path.
+        //
+        // DO NOT call unbindProcessNetwork() here — it was causing the VPN
+        // to stop working after initial connection.
+        Log.i(TAG, "Keeping process bound to physical network for ZeroTier SDK connectivity")
 
         monitorEngineHealth()
     }
@@ -713,10 +722,12 @@ class VpnTunnelService : AndroidVpnService() {
         VpnNotificationHelper.updateNotification(this, "P2P Mesh VPN active")
         Log.i(TAG, "TUN bridge started — VPN tunnel is active")
 
-        // ── Unbind process from physical network after TUN is up ───────────
-        // Now that TUN is established and ZeroTier has already discovered the
-        // physical network, we unbind so app traffic can flow through the VPN TUN.
-        unbindProcessNetwork()
+        // ── Do NOT unbind process from physical network ────────────────────
+        // CRITICAL FIX: Same as SENDER mode — we must KEEP bindProcessToNetwork
+        // active because the ZeroTier SDK needs continuous physical network
+        // access for UDP P2P communication. The VPN app is already excluded
+        // from the TUN via addDisallowedApplication(), so routing works correctly.
+        Log.i(TAG, "Keeping process bound to physical network for ZeroTier SDK connectivity")
 
         monitorEngineHealth()
     }

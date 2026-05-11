@@ -519,6 +519,14 @@ Java_com_vpnengine_nativecore_ZtEngine_nativeZtsTcpConnect(
             return -1;
         }
 
+        // CRITICAL FIX: Protect the ZeroTier socket from routing through the VPN tunnel.
+        // Without protect(), the outgoing connection would route through the VPN TUN
+        // interface instead of the real internet, causing a routing loop.
+        bool protected_ = callOnZtSocketCreated(sock);
+        if (!protected_) {
+            LOG_W("nativeZtsTcpConnect: Failed to protect zts_socket fd=%d — connection may route through VPN tunnel", sock);
+        }
+
         int result = zts_connect(sock, ip.c_str(), static_cast<unsigned short>(destPort), 10000);
         if (result < 0) {
             LOG_E("zts_connect to %s:%d failed, errno=%d",

@@ -298,11 +298,13 @@ object ZtEngine {
                 // OFFLINE — transition to Reconnecting instead of Error
                 // The Kotlin layer will handle auto-retry
                 Log.w(TAG, "ZeroTier node offline — triggering reconnect")
+                VpnStateHolder.updateState(VpnState.Reconnecting(1, 5))
             }
             4 -> { VpnStateHolder.updateState(VpnState.Connected()) }
             5 -> {
                 // NETWORK_DOWN — transition to Reconnecting instead of Error
                 Log.w(TAG, "ZeroTier network down — triggering reconnect")
+                VpnStateHolder.updateState(VpnState.Reconnecting(1, 5))
             }
             6 -> { VpnStateHolder.updateState(VpnState.JoiningMesh) }
             7 -> { VpnStateHolder.updateState(VpnState.WaitingAuthorization) }
