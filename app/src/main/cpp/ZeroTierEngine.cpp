@@ -752,34 +752,28 @@ void ZeroTierEngine::tunBridgeLoopInner() {
         return;
     }
 
-    // ── Create ZeroTier raw socket for IP packet forwarding ────────────
-    int ztRawSock = zts_bsd_socket(ZTS_AF_INET, ZTS_SOCK_RAW, ZTS_IPPROTO_RAW);
-    if (ztRawSock < 0) {
-        LOG_E("zts_bsd_socket(SOCK_RAW) failed: %d — TUN bridge requires raw socket", ztRawSock);
-        setError("Cannot create ZeroTier raw socket (error " + std::to_string(ztRawSock) +
+    // ── Create ZeroTier UDP socket for IP packet forwarding ────────────
+    // NOTE: libzt does NOT support SOCK_RAW — zts_bsd_socket(SOCK_RAW) always returns -1.
+    // We use SOCK_DGRAM (UDP) instead, sending raw IP packets as UDP datagrams
+    // to the ZeroTier virtual network. The ZT network routes them to the correct peer.
+    int ztSock = zts_bsd_socket(ZTS_AF_INET, ZTS_SOCK_DGRAM, 0);
+    if (ztSock < 0) {
+        LOG_E("zts_bsd_socket(SOCK_DGRAM) failed: %d — TUN bridge requires UDP socket", ztSock);
+        setError("Cannot create ZeroTier UDP socket (error " + std::to_string(ztSock) +
                  "). The ZeroTier network may not be ready yet.");
         if (!stopping_.load(std::memory_order_acquire)) {
-            notifyState(ZtStateCode::ERROR, "Cannot create raw socket for TUN bridge");
+            notifyState(ZtStateCode::ERROR, "Cannot create UDP socket for TUN bridge");
         }
         safeClose(epollFd);
         bridgeRunning_.store(false, std::memory_order_release);
         return;
     }
 
-    // Set IP_HDRINCL so we provide the full IP header.
-    int hdrincl = 1;
-    int setOptRc = zts_bsd_setsockopt(ztRawSock, ZTS_IPPROTO_IP, IP_HDRINCL, &hdrincl, sizeof(hdrincl));
-    if (setOptRc != 0) {
-        LOG_W("zts_bsd_setsockopt(IP_HDRINCL) failed: %d — raw socket may not support this", setOptRc);
-    }
-
-    // Register ZT raw socket for read events
-    struct epoll_event ztEv{};
-    ztEv.events = EPOLLIN | EPOLLERR | EPOLLHUP;
-    ztEv.data.fd = ztRawSock;
-    if (epoll_ctl(epollFd, EPOLL_CTL_ADD, ztRawSock, &ztEv) == -1) {
-        LOG_W("epoll_ctl ADD ztRawSock failed: %s — will poll manually", std::strerror(errno));
-    }
+    // Set the ZT socket to non-blocking mode so we can poll it without deadlocking
+    // NOTE: We cannot use epoll_ctl on ZT virtual fds — they are NOT real OS file descriptors.
+    // ZT sockets are indices into libzt's internal socket table, not kernel fds.
+    // Instead, we poll the ZT socket manually in the bridge loop using zts_bsd_recvfrom.
+    LOG_I("ZT UDP socket created (fd=%d) — will poll manually in bridge loop", ztSock);
 
     // ── Bridge loop ────────────────────────────────────────────────────
     alignas(64) uint8_t readBuf[ZtConfig::TUN_READ_BUF];
@@ -807,18 +801,12 @@ void ZeroTierEngine::tunBridgeLoopInner() {
                     LOG_E("EPOLLERR/EPOLLHUP on TUN fd=%d — fatal", tunFd_);
                     bridgeRunning_.store(false, std::memory_order_release);
                     break;
-                } else if (fd == ztRawSock) {
-                    LOG_W("EPOLLERR/EPOLLHUP on ZT raw socket — recreating");
-                    epoll_ctl(epollFd, EPOLL_CTL_DEL, ztRawSock, nullptr);
-                    zts_bsd_close(ztRawSock);
-                    ztRawSock = zts_bsd_socket(ZTS_AF_INET, ZTS_SOCK_RAW, ZTS_IPPROTO_RAW);
-                    if (ztRawSock >= 0) {
-                        zts_bsd_setsockopt(ztRawSock, ZTS_IPPROTO_IP, IP_HDRINCL,
-                                          &hdrincl, sizeof(hdrincl));
-                        struct epoll_event newEv{};
-                        newEv.events = EPOLLIN;
-                        newEv.data.fd = ztRawSock;
-                        epoll_ctl(epollFd, EPOLL_CTL_ADD, ztRawSock, &newEv);
+                } else if (fd == ztSock) {
+                    LOG_W("EPOLLERR/EPOLLHUP on ZT UDP socket — recreating");
+                    zts_bsd_close(ztSock);
+                    ztSock = zts_bsd_socket(ZTS_AF_INET, ZTS_SOCK_DGRAM, 0);
+                    if (ztSock >= 0) {
+                        LOG_I("ZT UDP socket recreated (fd=%d)", ztSock);
                     }
                 }
                 continue;
@@ -878,11 +866,11 @@ void ZeroTierEngine::tunBridgeLoopInner() {
                         destAddr.sin_family = ZTS_AF_INET;
                         destAddr.sin_addr.s_addr = iph->daddr;
 
-                        ssize_t sent = zts_bsd_sendto(ztRawSock, readBuf, pktLen, 0,
+                        ssize_t sent = zts_bsd_sendto(ztSock, readBuf, pktLen, 0,
                                                        reinterpret_cast<struct zts_sockaddr*>(&destAddr),
                                                        sizeof(destAddr));
                         if (sent < 0) {
-                            int err = errno;
+                            int err = zts_errno;
                             if (err != EAGAIN && err != EWOULDBLOCK) {
                                 char dst[INET_ADDRSTRLEN]{};
                                 inet_ntop(AF_INET, &iph->daddr, dst, sizeof(dst));
@@ -895,11 +883,11 @@ void ZeroTierEngine::tunBridgeLoopInner() {
                         destAddr6.sin6_family = ZTS_AF_INET6;
                         memcpy(&destAddr6.sin6_addr, readBuf + 24, 16);
 
-                        ssize_t sent = zts_bsd_sendto(ztRawSock, readBuf, pktLen, 0,
+                        ssize_t sent = zts_bsd_sendto(ztSock, readBuf, pktLen, 0,
                                                        reinterpret_cast<struct zts_sockaddr*>(&destAddr6),
                                                        sizeof(destAddr6));
                         if (sent < 0) {
-                            int err = errno;
+                            int err = zts_errno;
                             if (err != EAGAIN && err != EWOULDBLOCK) {
                                 LOG_W("zts_bsd_sendto IPv6 failed: %s (len=%zu)",
                                       std::strerror(err), pktLen);
@@ -912,33 +900,32 @@ void ZeroTierEngine::tunBridgeLoopInner() {
                 }
             }
 
-            // ── ZeroTier → TUN (Inbound) ───────────────────────────────
-            if (fd == ztRawSock && (evts & EPOLLIN)) {
-                while (true) {
-                    struct zts_sockaddr_storage srcAddr{};
-                    zts_socklen_t srcAddrLen = sizeof(srcAddr);
-                    ssize_t bytesRead = zts_bsd_recvfrom(ztRawSock, readBuf, sizeof(readBuf), 0,
-                                                         reinterpret_cast<struct zts_sockaddr*>(&srcAddr),
-                                                         &srcAddrLen);
-                    if (bytesRead < 0) {
-                        if (errno == EINTR) continue;
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-                        LOG_W("zts_bsd_recvfrom failed: %s", std::strerror(errno));
-                        break;
-                    }
-                    if (bytesRead == 0) break;
+        }
 
-                    size_t pktLen = static_cast<size_t>(bytesRead);
-                    packetsIn_.fetch_add(1, std::memory_order_relaxed);
-                    bytesIn_.fetch_add(pktLen, std::memory_order_relaxed);
+        // ── ZT → TUN (Inbound) — poll ZT socket manually ────────────
+        // We cannot use epoll on ZT virtual socket fds. Instead, we do a
+        // non-blocking recvfrom on each loop iteration to check for inbound data.
+        while (true) {
+            struct zts_sockaddr_in srcAddr{};
+            zts_socklen_t srcAddrLen = sizeof(srcAddr);
+            ssize_t ztBytesRead = zts_bsd_recvfrom(ztSock, readBuf, sizeof(readBuf), 0,
+                                                     reinterpret_cast<struct zts_sockaddr*>(&srcAddr),
+                                                     &srcAddrLen);
+            if (ztBytesRead < 0) {
+                // No more data available (EAGAIN/EWOULDBLOCK) or error
+                break;
+            }
+            if (ztBytesRead == 0) break;
 
-                    // Write inbound packet to TUN
-                    ssize_t written = write(tunFd_, readBuf, pktLen);
-                    if (written < 0) {
-                        if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                            LOG_W("write() to TUN failed: %s", std::strerror(errno));
-                        }
-                    }
+            size_t ztPktLen = static_cast<size_t>(ztBytesRead);
+            packetsIn_.fetch_add(1, std::memory_order_relaxed);
+            bytesIn_.fetch_add(ztPktLen, std::memory_order_relaxed);
+
+            // Write the packet to the TUN interface
+            ssize_t written = write(tunFd_, readBuf, ztPktLen);
+            if (written < 0) {
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    LOG_W("write() to TUN failed: %s", std::strerror(errno));
                 }
             }
         }
@@ -953,9 +940,8 @@ void ZeroTierEngine::tunBridgeLoopInner() {
     }
 
     // ── Cleanup ─────────────────────────────────────────────────────────
-    if (ztRawSock >= 0) {
-        epoll_ctl(epollFd, EPOLL_CTL_DEL, ztRawSock, nullptr);
-        zts_bsd_close(ztRawSock);
+    if (ztSock >= 0) {
+        zts_bsd_close(ztSock);
     }
     safeClose(epollFd);
 
@@ -1069,6 +1055,12 @@ void ZeroTierEngine::onZtEvent(void* msg) {
             LOG_I("ZTS_EVENT_NODE_ONLINE — Node ID: %010" PRIx64, nodeId);
             engine->nodeId_.store(nodeId, std::memory_order_release);
             engine->online_.store(true, std::memory_order_release);
+
+            // NOTE: socketProtectCallback_ is not called here because libzt does NOT
+            // expose its internal OS-level socket file descriptors. Socket protection
+            // is handled by bindProcessToNetwork() in VpnTunnelService.kt, which
+            // forces ALL process sockets (including native ones) to route through the
+            // physical network, effectively bypassing the VPN tunnel.
 
             // Notify state: P2P handshake is starting
             engine->currentState_.store(ZtStateCode::P2P_HANDSHAKE, std::memory_order_release);

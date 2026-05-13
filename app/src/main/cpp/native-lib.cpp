@@ -123,6 +123,7 @@ static void callOnZtStateChanged(int stateCode, const std::string& message) {
     } catch (...) {}
 
     if (env->ExceptionCheck()) { env->ExceptionDescribe(); env->ExceptionClear(); }
+    env->DeleteLocalRef(jMsg);
 }
 
 static void callOnZtAssignedIP(const std::string& ipv4, const std::string& ipv6) {
@@ -144,6 +145,8 @@ static void callOnZtAssignedIP(const std::string& ipv4, const std::string& ipv6)
     }
 
     if (env->ExceptionCheck()) { env->ExceptionDescribe(); env->ExceptionClear(); }
+    if (jIpv4) env->DeleteLocalRef(jIpv4);
+    if (jIpv6) env->DeleteLocalRef(jIpv6);
 }
 
 static void callOnZtTrafficStats(uint64_t bytesIn, uint64_t bytesOut,
@@ -520,13 +523,15 @@ Java_com_vpnengine_nativecore_ZtEngine_nativeZtsTcpConnect(
             return -1;
         }
 
-        // CRITICAL FIX: Protect the ZeroTier socket from routing through the VPN tunnel.
-        // Without protect(), the outgoing connection would route through the VPN TUN
-        // interface instead of the real internet, causing a routing loop.
-        bool protected_ = callOnZtSocketCreated(sock);
-        if (!protected_) {
-            LOG_W("nativeZtsTcpConnect: Failed to protect zts_socket fd=%d — connection may route through VPN tunnel", sock);
-        }
+        // NOTE: Socket protection is NOT done here because zts_socket() returns a
+        // ZeroTier virtual fd (an index into libzt's internal socket table), NOT an
+        // OS-level file descriptor. Calling VpnService.protect() on a virtual fd is
+        // meaningless — it needs a real OS socket fd.
+        //
+        // Instead, socket protection is handled by bindProcessToNetwork() in
+        // VpnTunnelService.kt, which forces ALL process sockets (including native
+        // ones opened by libzt internally) to route through the physical network,
+        // effectively bypassing the VPN tunnel.
 
         int result = zts_connect(sock, ip.c_str(), static_cast<unsigned short>(destPort), 10000);
         if (result < 0) {
@@ -606,8 +611,8 @@ Java_com_vpnengine_nativecore_ZtEngine_nativeSendToFd(
             return -1;
         }
 
-        ssize_t sent = write(fd, buf, length);
-        int writeErr = (sent < 0) ? errno : 0;
+        ssize_t sent = zts_write(fd, buf, length);
+        int writeErr = (sent < 0) ? zts_errno : 0;
 
         env->ReleaseByteArrayElements(data, buf, JNI_ABORT);
 
@@ -644,10 +649,10 @@ Java_com_vpnengine_nativecore_ZtEngine_nativeRecvFromFd(
         // Allocate a temporary buffer for the read
         std::vector<uint8_t> tmpBuf(capacity);
 
-        ssize_t bytesRead = read(fd, tmpBuf.data(), capacity);
+        ssize_t bytesRead = zts_read(fd, tmpBuf.data(), capacity);
 
         if (bytesRead < 0) {
-            int readErr = errno;
+            int readErr = zts_errno;
             if (readErr == EAGAIN || readErr == EWOULDBLOCK) {
                 return 0;  // Non-blocking, no data available yet
             }

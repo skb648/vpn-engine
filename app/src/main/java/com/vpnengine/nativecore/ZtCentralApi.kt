@@ -49,12 +49,10 @@ object ZtCentralApi {
     private const val MAX_RETRIES = 3
     private const val RETRY_BASE_DELAY_MS = 1000L
 
-    /**
-     * Create an authenticated Retrofit service instance.
-     *
-     * @param apiToken ZeroTier Central API token from my.zerotier.com/account#tokens
-     */
-    fun createService(apiToken: String): ZtCentralService {
+    // CRITICAL FIX: Singleton OkHttpClient to prevent thread/socket exhaustion.
+    // Previously, a new OkHttpClient (with its own 5-thread pool and connection pool)
+    // was created on every API call, exhausting threads and sockets over time.
+    private val sharedClient: OkHttpClient by lazy {
         val logging = HttpLoggingInterceptor().apply {
             level = if (BuildConfig.DEBUG) {
                 HttpLoggingInterceptor.Level.BASIC
@@ -62,21 +60,33 @@ object ZtCentralApi {
                 HttpLoggingInterceptor.Level.NONE
             }
         }
-
-        val client = OkHttpClient.Builder()
+        OkHttpClient.Builder()
             .connectTimeout(CONNECT_TIMEOUT_SEC, TimeUnit.SECONDS)
             .readTimeout(READ_TIMEOUT_SEC, TimeUnit.SECONDS)
             .writeTimeout(READ_TIMEOUT_SEC, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .addInterceptor(logging)
             .build()
+    }
 
-        return Retrofit.Builder()
+    // Cache the Retrofit service instance per base URL (only one in practice)
+    @Volatile
+    private var cachedService: ZtCentralService? = null
+
+    fun createService(apiToken: String): ZtCentralService {
+        // Return cached service if available — the auth token is passed per-request
+        // via the @Header("Authorization") parameter, so the service itself is token-agnostic
+        cachedService?.let { return it }
+
+        val service = Retrofit.Builder()
             .baseUrl(BASE_URL)
-            .client(client)
+            .client(sharedClient)
             .addConverterFactory(GsonConverterFactory.create())
             .build()
             .create(ZtCentralService::class.java)
+
+        cachedService = service
+        return service
     }
 
     /**
@@ -121,14 +131,27 @@ object ZtCentralApi {
         val body = AuthorizeMemberRequest(
             config = MemberConfig(authorized = true)
         )
-        service.authorizeMember(
-            auth = "Bearer $apiToken",
-            networkId = networkId,
-            nodeId = nodeId,
-            body = body
-        )
-        Log.i(TAG, "Node $nodeId authorized on network $networkId")
-        Result.success(Unit)
+        try {
+            service.authorizeMember(
+                auth = "Bearer $apiToken",
+                networkId = networkId,
+                nodeId = nodeId,
+                body = body
+            )
+            Log.i(TAG, "Node $nodeId authorized on network $networkId")
+            Result.success(Unit)
+        } catch (e: retrofit2.HttpException) {
+            // CRITICAL FIX: Provide user-friendly error messages instead of
+            // raw HTTP exception stacktraces
+            val userMessage = when (e.code()) {
+                401 -> "Invalid API token. Check your ZeroTier Central API token at my.zerotier.com/account#tokens"
+                403 -> "Permission denied. Your API token may not have write access to this network."
+                404 -> "Network or node not found. Check your Network ID and ensure the node has tried to join."
+                else -> "Authorization failed: HTTP ${e.code()} — ${e.message()}"
+            }
+            Log.e(TAG, "authorizeNode failed: $userMessage")
+            Result.failure(Exception(userMessage, e))
+        }
     }
 
     /**
@@ -245,6 +268,12 @@ object ZtCentralApi {
         for (attempt in 1..MAX_RETRIES) {
             try {
                 return@withContext block()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // CRITICAL FIX: Never catch CancellationException —
+                // it must be rethrown so coroutines can be cancelled properly.
+                // Previously this was caught by the general Exception handler,
+                // causing service teardown to hang for 3+ seconds per API call.
+                throw e
             } catch (e: Exception) {
                 lastException = e
                 Log.w(TAG, "API call failed (attempt $attempt/$MAX_RETRIES): ${e.message}")

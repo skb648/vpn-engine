@@ -387,8 +387,13 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                         Log.e(TAG, "Auth check exception", e)
                     }
                 } else if (state is VpnState.Connected || state is VpnState.Disconnected || state is VpnState.Error) {
-                    // Stop checking when connected, disconnected, or error
                     attemptCount = 0
+                    if (state is VpnState.Connected) {
+                        // CRITICAL FIX: Cancel auth check when connected.
+                        // Previously the auth check loop continued running every 8 seconds
+                        // forever after Connected state — a resource leak.
+                        cancelAuthCheck()
+                    }
                     if (state is VpnState.Disconnected || state is VpnState.Error) {
                         _authStatus.value = null
                     }
@@ -496,8 +501,20 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     is VpnState.Error -> {
                         if (ZtEngine.isRunningSafe()) {
-                            Log.w(TAG, "State=Error but engine still running — stopping engine")
-                            ZtEngine.stopSafe()
+                            Log.w(TAG, "State=Error but engine still running — stopping via service")
+                            // CRITICAL FIX: Stop via VpnTunnelService instead of calling
+                            // ZtEngine.stopSafe() directly. Direct stop bypasses:
+                            // - TUN interface closure (ParcelFileDescriptor)
+                            // - Foreground notification cancellation
+                            // - Wake lock release
+                            // - VpnStateHolder.reset()
+                            // This caused zombie service state where the service kept running
+                            // but the engine was stopped.
+                            val app = getApplication<Application>()
+                            val intent = Intent(app, VpnTunnelService::class.java).apply {
+                                action = VpnTunnelService.ACTION_STOP
+                            }
+                            app.startService(intent)
                         }
                     }
                     is VpnState.Reconnecting -> {

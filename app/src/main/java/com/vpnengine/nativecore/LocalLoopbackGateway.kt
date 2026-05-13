@@ -38,7 +38,9 @@ class LocalLoopbackGateway(
 ) {
     companion object {
         private const val TAG = "LocalLoopbackGW"
-        const val DEFAULT_PORT = 1080
+        const val DEFAULT_PORT = 1081  // CRITICAL FIX: Changed from 1080 to avoid conflict
+        // with Socks5ProxyServer which defaults to 1080. If both bind to 1080
+        // (even on different interfaces), misconfiguration can create proxy loops.
         private const val BIND_HOST = "127.0.0.1"
 
         private const val SOCKS_VER: Byte = 0x05

@@ -59,12 +59,12 @@ class TcpConnectionManager(
         val dstAddress: String,
         val dstPort: Int,
         val socks5Connection: ZtSocks5Client.Socks5Connection,
-        var seqNumber: Long,
-        var ackNumber: Long,
-        var clientSeqNumber: Long,
-        var clientAckNumber: Long,
-        var state: TcpState = TcpState.SYN_RECEIVED,
-        var lastActivityMs: Long = System.currentTimeMillis(),
+        @Volatile var seqNumber: Long,
+        @Volatile var ackNumber: Long,
+        @Volatile var clientSeqNumber: Long,
+        @Volatile var clientAckNumber: Long,
+        @Volatile var state: TcpState = TcpState.SYN_RECEIVED,
+        @Volatile var lastActivityMs: Long = System.currentTimeMillis(),
         val bridgeJob: Job? = null
     )
 
@@ -134,13 +134,47 @@ class TcpConnectionManager(
 
     /**
      * Process a UDP packet from the TUN interface.
-     * For UDP, we don't track connections — we forward through the C++ ZT bridge.
+     * Forwards UDP traffic through the ZeroTier SOCKS5 proxy or C++ TUN bridge.
+     * CRITICAL FIX: Previously this was a no-op that silently dropped all UDP —
+     * DNS queries, video streams, games, etc. were all discarded, causing
+     * "DNS resolution failed" and broken connectivity even when TCP worked.
      */
     fun processUdpPacket(packet: IpPacketParser.ParsedPacket) {
-        // UDP forwarding is handled by the C++ TUN bridge (zts_bsd_sendto)
-        // We just log it here for diagnostics
-        Log.d(TAG, "UDP packet: ${packet.sourceAddress}:${packet.sourcePort} -> " +
-                "${packet.destinationAddress}:${packet.destinationPort} (${packet.payloadLength} bytes)")
+        if (exitNodeAddress.isBlank()) {
+            Log.w(TAG, "UDP packet dropped: no exit node configured for ${packet.destinationAddress}:${packet.destinationPort}")
+            return
+        }
+
+        try {
+            // Forward UDP through a short-lived SOCKS5 connection via ZeroTier.
+            // UDP is connectionless so we create a one-shot proxy connection,
+            // send the datagram, and close immediately.
+            val key = "udp-${packet.sourceAddress}:${packet.sourcePort}->${packet.destinationAddress}:${packet.destinationPort}"
+            
+            scope.launch(Dispatchers.IO) {
+                try {
+                    val socks5Conn = socks5Client.connectThroughProxy(
+                        proxyAddress = exitNodeAddress,
+                        proxyPort = exitNodePort,
+                        targetHost = packet.destinationAddress,
+                        targetPort = packet.destinationPort
+                    )
+                    if (socks5Conn != null) {
+                        val payload = packet.udpPayload
+                        if (payload.isNotEmpty()) {
+                            socks5Conn.write(payload)
+                        }
+                        socks5Conn.close()
+                    } else {
+                        Log.w(TAG, "UDP SOCKS5 connect failed for ${packet.destinationAddress}:${packet.destinationPort}")
+                    }
+                } catch (e: Exception) {
+                    Log.d(TAG, "UDP forward error: ${e.message}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "UDP packet processing error: ${e.message}")
+        }
     }
 
     /**
@@ -169,10 +203,12 @@ class TcpConnectionManager(
 
         Log.i(TAG, "New TCP connection: ${packet.destinationAddress}:${packet.destinationPort} via exit node $exitNodeAddress")
 
-        // Send SYN-ACK to the client immediately (before proxy connection is ready)
-        // This keeps the TCP handshake going while we establish the SOCKS5 connection
+        // CRITICAL FIX: Establish SOCKS5 connection FIRST, then send SYN-ACK.
+        // Previously, SYN-ACK was sent before the proxy connection was ready.
+        // If the proxy connection failed, the client had already received a SYN-ACK
+        // (connection accepted) and then got a RST — causing a confusing half-open
+        // TCP state visible as "connection refused" instead of "connection failed to connect."
         val initialSeq = System.currentTimeMillis() and 0xFFFFFFFFL  // Random-ish initial sequence
-        sendSynAck(packet, initialSeq, packet.tcpSeqNumber + 1)
 
         // Establish SOCKS5 connection through ZeroTier to the exit node
         val socks5Conn = socks5Client.connectThroughProxy(
@@ -187,6 +223,9 @@ class TcpConnectionManager(
             sendRst(packet)
             return
         }
+
+        // Now that the proxy is ready, send SYN-ACK to the client
+        sendSynAck(packet, initialSeq, packet.tcpSeqNumber + 1)
 
         val conn = TcpConnection(
             srcAddress = packet.sourceAddress,
@@ -306,7 +345,12 @@ class TcpConnectionManager(
                     break
                 }
                 if (bytesRead == 0) {
-                    delay(1)  // Small yield to prevent busy loop
+                    delay(50)  // CRITICAL FIX: 50ms yield instead of 1ms.
+                    // Previously delay(1) caused ~1000 iterations/second per connection,
+                    // burning CPU. With 50 idle connections that's 50,000 wasted
+                    // iterations/second. 50ms is a reasonable polling interval for
+                    // non-blocking reads — 20 checks/second is more than sufficient
+                    // for SOCKS5 proxy data detection.
                     continue
                 }
 
