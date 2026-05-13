@@ -343,7 +343,7 @@ object IpPacketParser {
                 version = 6,
                 protocol = nextHeader,
                 sourceAddress = srcAddr,
-                destinationAddress = destinationAddress,
+                destinationAddress = dstAddr,
                 sourcePort = sourcePort,
                 destinationPort = destinationPort,
                 tcpFlags = tcpFlags,

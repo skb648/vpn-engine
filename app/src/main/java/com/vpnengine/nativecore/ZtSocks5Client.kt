@@ -208,8 +208,8 @@ class ZtSocks5Client(
      */
     private fun buildConnectRequest(host: String, port: Int): ByteArray {
         // Try to parse as IPv4/IPv6 address first, fall back to domain name
-        val addrBytes: ByteArray
-        val atyp: Byte
+        var addrBytes: ByteArray
+        var atyp: Byte
 
         try {
             val inetAddr = InetAddress.getByName(host)
