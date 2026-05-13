@@ -103,6 +103,14 @@ object ZtEngine {
     external fun nativeGetAddress(index: Long): String?
     external fun nativeZtsTcpConnect(destIP: String, destPort: Int): Int
 
+    // ── Native SOCKS5 server (SENDER mode) ─────────────────────────────────
+    // Runs entirely inside libzt's user-space TCP/IP stack so it can bind to
+    // the ZeroTier virtual IP, which does NOT exist in the Linux kernel.
+    external fun nativeStartSocks5(bindIp: String, port: Int): Boolean
+    external fun nativeStopSocks5()
+    external fun nativeIsSocks5Running(): Boolean
+    external fun nativeGetSocks5Error(): String
+
     // Note: nativeJoinNetwork and nativeLeaveNetwork are already declared
     // in the native library via native-lib.cpp lines 363-387.
 
@@ -232,6 +240,30 @@ object ZtEngine {
         return try { nativeReadPacket(buffer, capacity) }
         catch (e: Exception) { Log.e(TAG, "readPacket failed", e); 0 }
         catch (e: Error) { Log.e(TAG, "readPacket error", e); 0 }
+    }
+
+    fun startSocks5Safe(bindIp: String, port: Int): Boolean {
+        if (!nativeLibraryLoaded) return false
+        return try { nativeStartSocks5(bindIp, port) }
+        catch (e: Exception) { Log.e(TAG, "startSocks5 failed", e); false }
+        catch (e: Error) { Log.e(TAG, "startSocks5 error", e); false }
+    }
+
+    fun stopSocks5Safe() {
+        if (!nativeLibraryLoaded) return
+        try { nativeStopSocks5() }
+        catch (e: Exception) { Log.e(TAG, "stopSocks5 failed", e) }
+        catch (e: Error) { Log.e(TAG, "stopSocks5 error", e) }
+    }
+
+    fun isSocks5RunningSafe(): Boolean {
+        if (!nativeLibraryLoaded) return false
+        return try { nativeIsSocks5Running() } catch (e: Exception) { false } catch (e: Error) { false }
+    }
+
+    fun getSocks5ErrorSafe(): String {
+        if (!nativeLibraryLoaded) return loadError
+        return try { nativeGetSocks5Error() } catch (e: Exception) { "" } catch (e: Error) { "" }
     }
 
     fun ztsTcpConnect(destIP: String, destPort: Int): Int {

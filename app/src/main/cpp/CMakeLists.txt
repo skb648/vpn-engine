@@ -53,6 +53,7 @@ set(ZT_SHARED_LIB "${ZT_LIB_DIR}/libzt.so")
 set(ENGINE_SOURCES
     native-lib.cpp
     ZeroTierEngine.cpp
+    Socks5Server.cpp
 )
 
 if(EXISTS "${ZT_SHARED_LIB}")
