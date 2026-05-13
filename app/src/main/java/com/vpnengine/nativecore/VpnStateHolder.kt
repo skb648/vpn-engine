@@ -122,8 +122,12 @@ object VpnStateHolder {
     fun updateNodeId(id: Long) {
         _nodeId.value = id
         // Also update the string representation
+        // CRITICAL FIX: Use BigInteger for unsigned formatting.
+        // String.format("%010x", id) produces MORE than 10 chars when id is
+        // negative (high bit set in unsigned 64-bit value). ZeroTier node IDs
+        // are the first 10 hex chars of the identity.
         if (id != 0L) {
-            val formatted = String.format(java.util.Locale.US, "%010x", id)
+            val formatted = ZtEngine.networkIdToBigInt(id).toString(16).padStart(10, '0').take(10)
             if (_nodeIdString.value != formatted) {
                 _nodeIdString.value = formatted
                 Log.d(TAG, "Node ID string updated: $formatted")

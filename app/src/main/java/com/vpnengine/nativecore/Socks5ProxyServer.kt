@@ -134,10 +134,12 @@ class Socks5ProxyServer(
             acceptJob?.cancel()
         } catch (_: Exception) {}
 
+        try {
             for (socket in activeConnections) {
                 try { socket.close() } catch (_: Exception) {}
             }
             activeConnections.clear()
+        } catch (_: Exception) {}
 
         try {
             serverSocket?.close()

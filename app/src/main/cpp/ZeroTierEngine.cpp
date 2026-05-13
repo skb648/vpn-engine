@@ -1091,6 +1091,18 @@ void ZeroTierEngine::onZtEvent(void* msg) {
             engine->online_.store(false, std::memory_order_release);
             break;
 
+        case ZTS_EVENT_NODE_FATAL_ERROR: {
+            LOG_E("ZTS_EVENT_NODE_FATAL_ERROR — Identity collision or fatal error!");
+            // CRITICAL FIX: Handle fatal errors like identity collision.
+            // The node must be stopped, identity deleted, and restarted.
+            // For now, notify the Kotlin layer which will handle recovery.
+            engine->online_.store(false, std::memory_order_release);
+            engine->notifyState(ZtStateCode::ERROR,
+                               "Fatal error: Node identity collision detected. "
+                               "The app will delete the old identity and generate a new one.");
+            break;
+        }
+
         case ZTS_EVENT_STORE_IDENTITY_PUBLIC:
             LOG_D("ZTS_EVENT_STORE_IDENTITY_PUBLIC — Identity stored");
             break;
@@ -1156,18 +1168,27 @@ void ZeroTierEngine::onZtEvent(void* msg) {
 
         case ZTS_EVENT_NETWORK_OK: {
             uint64_t netId = event->network->net_id;
-            LOG_I("ZTS_EVENT_NETWORK_OK — Network %016" PRIx64 " joined successfully", netId);
-            engine->currentState_.store(ZtStateCode::WAITING_AUTHORIZATION, std::memory_order_release);
-            engine->notifyState(ZtStateCode::WAITING_AUTHORIZATION,
-                               "Waiting for network authorization at my.zerotier.com...");
+            LOG_I("ZTS_EVENT_NETWORK_OK — Network %016" PRIx64 " joined successfully (authorized)", netId);
+            // CRITICAL FIX: NETWORK_OK means the node IS authorized and joined.
+            // Do NOT set WAITING_AUTHORIZATION here — that prevents IP assignment
+            // from being detected by the Kotlin waitForAssignedIP() method.
+            // The node now waits for NETWORK_READY_IP4 which assigns the IP.
+            engine->currentState_.store(ZtStateCode::AUTHENTICATING, std::memory_order_release);
+            engine->notifyState(ZtStateCode::AUTHENTICATING,
+                               "Network joined — waiting for IP assignment...");
             break;
         }
 
         case ZTS_EVENT_NETWORK_ACCESS_DENIED: {
             uint64_t netId = event->network->net_id;
             LOG_E("ZTS_EVENT_NETWORK_ACCESS_DENIED — Network %016" PRIx64, netId);
-            engine->notifyState(ZtStateCode::ERROR,
-                               "Access denied by network controller. Authorize at my.zerotier.com");
+            // CRITICAL FIX: Set WAITING_AUTHORIZATION here, not ERROR.
+            // For private networks, this is expected — the admin needs to authorize
+            // the node. The Kotlin layer will show the proper auth status and auto-auth
+            // will attempt via Central API if a token is provided.
+            engine->currentState_.store(ZtStateCode::WAITING_AUTHORIZATION, std::memory_order_release);
+            engine->notifyState(ZtStateCode::WAITING_AUTHORIZATION,
+                               "Access denied — authorize this node at my.zerotier.com or provide API token for auto-auth");
             break;
         }
 

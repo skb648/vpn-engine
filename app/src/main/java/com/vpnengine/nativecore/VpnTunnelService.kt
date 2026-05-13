@@ -986,16 +986,33 @@ class VpnTunnelService : AndroidVpnService() {
     }
 
     /**
-     * Monitor engine health. Instead of immediately killing the connection
-     * on 3 consecutive failures, attempt auto-reconnect first.
+     * Monitor engine health and poll traffic statistics.
+     *
+     * CRITICAL FIX (BUG 3): Previously, traffic stats never updated after
+     * connection because this method only checked running/online status.
+     * Now it also:
+     *   1. Polls the C++ engine for current assigned IP and refreshes VpnStateHolder
+     *   2. Logs current traffic stats from VpnStateHolder (updated by C++ callbacks)
+     *   3. Detects stale traffic stats and logs a warning
+     *   4. Checks if the engine is still online and attempts auto-reconnect on failure
      */
     private suspend fun monitorEngineHealth() {
         var consecutiveFailures = 0
         val maxFailures = 3
+        var lastStatsLogTime = 0L
+        val statsLogIntervalMs = 30_000L // Log traffic stats every 30s
+        var lastStatsBytesIn = 0L
+        var lastStatsBytesOut = 0L
+        var staleStatsCount = 0
+        val maxStaleStatsCount = 6 // 30 seconds * 6 = 3 minutes of stale stats
+
         while (currentCoroutineContext().isActive) {
             delay(MONITOR_INTERVAL_MS)
+
             val running = ZtEngine.isRunningSafe()
             val online = ZtEngine.isOnlineSafe()
+
+            // ── Health check: engine running and online ────────────────────
             if (!running || !online) {
                 consecutiveFailures++
                 Log.w(TAG, "Health check: running=$running online=$online ($consecutiveFailures/$maxFailures)")
@@ -1012,6 +1029,49 @@ class VpnTunnelService : AndroidVpnService() {
                     Log.i(TAG, "Engine recovered after $consecutiveFailures failed checks")
                 }
                 consecutiveFailures = 0
+            }
+
+            // ── Poll C++ engine for assigned IP and refresh VpnStateHolder ──
+            // This ensures VpnStateHolder stays in sync even if a C++ callback
+            // was missed or the IP changed (e.g., after network re-join).
+            val currentIp = ZtEngine.getAssignedIPv4Safe()
+            if (currentIp.isNotBlank() && currentIp != VpnStateHolder.assignedIPv4.value) {
+                Log.i(TAG, "Health check: IP changed from ${VpnStateHolder.assignedIPv4.value} to $currentIp — updating")
+                VpnStateHolder.updateAssignedIP(currentIp, VpnStateHolder.assignedIPv6.value)
+            }
+
+            // ── Refresh Node ID from engine ────────────────────────────────
+            val currentNodeId = ZtEngine.getNodeIdSafe()
+            if (currentNodeId != 0L && currentNodeId != VpnStateHolder.nodeId.value) {
+                VpnStateHolder.updateNodeId(currentNodeId)
+            }
+
+            // ── Traffic stats monitoring ───────────────────────────────────
+            // Traffic stats are updated by C++ via the onZtTrafficStats callback.
+            // We monitor them here to detect stale stats and log periodic updates.
+            val stats = VpnStateHolder.trafficStats.value
+            val now = System.currentTimeMillis()
+
+            // Detect stale stats: if bytes haven't changed for multiple checks
+            if (stats.bytesIn == lastStatsBytesIn && stats.bytesOut == lastStatsBytesOut) {
+                staleStatsCount++
+                if (staleStatsCount >= maxStaleStatsCount) {
+                    Log.w(TAG, "Traffic stats appear stale (no change for " +
+                        "${staleStatsCount * MONITOR_INTERVAL_MS / 1000}s) — " +
+                        "bytesIn=${stats.bytesIn} bytesOut=${stats.bytesOut}")
+                    staleStatsCount = 0 // Reset to avoid spamming
+                }
+            } else {
+                staleStatsCount = 0
+            }
+            lastStatsBytesIn = stats.bytesIn
+            lastStatsBytesOut = stats.bytesOut
+
+            // Log traffic stats periodically for debugging
+            if (now - lastStatsLogTime >= statsLogIntervalMs) {
+                Log.i(TAG, "Traffic stats: bytesIn=${stats.bytesIn} bytesOut=${stats.bytesOut} " +
+                    "packetsIn=${stats.packetsIn} packetsOut=${stats.packetsOut}")
+                lastStatsLogTime = now
             }
         }
     }

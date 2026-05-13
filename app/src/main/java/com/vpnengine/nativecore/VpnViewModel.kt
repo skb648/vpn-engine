@@ -340,7 +340,10 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                         continue
                     }
 
-                    val nodeIdStr = String.format(java.util.Locale.US, "%010x", nodeIdLong)
+                    // CRITICAL FIX: Use BigInteger for unsigned formatting.
+                    // String.format("%010x", nodeIdLong) produces MORE than 10 chars
+                    // when nodeIdLong is negative (high bit set in unsigned 64-bit value).
+                    val nodeIdStr = ZtEngine.networkIdToBigInt(nodeIdLong).toString(16).padStart(10, '0').take(10)
                     Log.d(TAG, "Checking authorization status (attempt $attemptCount)...")
 
                     try {
@@ -429,7 +432,8 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
-            val nodeIdStr = String.format(java.util.Locale.US, "%010x", nodeIdLong)
+            // CRITICAL FIX: Use BigInteger for unsigned formatting.
+            val nodeIdStr = ZtEngine.networkIdToBigInt(nodeIdLong).toString(16).padStart(10, '0').take(10)
             _snackBarEvent.tryEmit("Checking authorization status...")
 
             val status = ZtCentralApi.checkAuthorizationStatus(token, networkIdStr, nodeIdStr)

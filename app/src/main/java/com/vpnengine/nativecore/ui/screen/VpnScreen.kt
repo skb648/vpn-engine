@@ -70,7 +70,11 @@ fun VpnScreen(
             try {
                 val engineNodeId = com.vpnengine.nativecore.ZtEngine.getNodeIdSafe()
                 if (engineNodeId != 0L) {
-                    val formatted = String.format(java.util.Locale.US, "%010x", engineNodeId)
+                    // CRITICAL FIX: Use BigInteger for unsigned formatting.
+                    // String.format("%010x", engineNodeId) produces MORE than 10 chars
+                    // when engineNodeId is negative (high bit set in unsigned 64-bit value).
+                    val formatted = com.vpnengine.nativecore.ZtEngine
+                        .networkIdToBigInt(engineNodeId).toString(16).padStart(10, '0').take(10)
                     if (formatted != ztNodeId) {
                         ztNodeId = formatted
                     }
