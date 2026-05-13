@@ -260,6 +260,33 @@ bool ZeroTierEngine::start(const std::string& configPath, uint64_t networkId) {
         g_sdkAvailable.store(true, std::memory_order_release);
         LOG_I("ZeroTier SDK initialized — event handler registered successfully");
 
+        // ════════════════════════════════════════════════════════════════════
+        // CRITICAL FIX (v8): Explicitly enable all caches and port mapping.
+        //
+        // Without these, the SDK may fail to:
+        //   - Persist its node identity (no node ID stability across restarts)
+        //   - Cache root server addresses (cannot contact root servers!)
+        //   - Cache peer paths (slow reconnection)
+        //   - Cache network membership (must re-fetch on every start)
+        //
+        // The most common cause of "device does not appear on ZeroTier Central"
+        // is that the SDK cannot reach the root servers because the roots
+        // cache was never written. Enabling roots_cache + port_mapping
+        // (NAT-PMP / UPnP) dramatically improves connectivity on home routers.
+        //
+        // We also enable a secondary port and a wide random port range so
+        // strict NAT/ISPs (Jio/Airtel symmetric NAT) have multiple chances
+        // for UDP hole-punching to succeed.
+        // ════════════════════════════════════════════════════════════════════
+        (void)zts_init_allow_id_cache(1);
+        (void)zts_init_allow_net_cache(1);
+        (void)zts_init_allow_peer_cache(1);
+        (void)zts_init_allow_roots_cache(1);
+        (void)zts_init_allow_secondary_port(1);
+        (void)zts_init_allow_port_mapping(1);
+        (void)zts_init_allow_tcp_relay(1);
+        LOG_I("ZeroTier init flags: id/net/peer/roots cache enabled; secondary port, port mapping and TCP relay enabled");
+
         rc = zts_init_from_storage(configPath.c_str());
         if (rc != ZTS_ERR_OK) {
             const std::string errMsg =

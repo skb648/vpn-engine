@@ -76,3 +76,13 @@ int zts_close(int) { return ZTS_ERR_SOCKET; }
 
 // Global errno for ZeroTier SDK socket operations
 int zts_errno = 0;
+
+// ── Stubs for cache / port mapping init flags ───────────────────────────────
+// These are no-ops in stub builds. Real libzt provides them.
+int zts_init_allow_id_cache(unsigned int)        { return ZTS_ERR_SERVICE; }
+int zts_init_allow_net_cache(unsigned int)       { return ZTS_ERR_SERVICE; }
+int zts_init_allow_peer_cache(unsigned int)      { return ZTS_ERR_SERVICE; }
+int zts_init_allow_roots_cache(unsigned int)     { return ZTS_ERR_SERVICE; }
+int zts_init_allow_secondary_port(unsigned int)  { return ZTS_ERR_SERVICE; }
+int zts_init_allow_port_mapping(unsigned int)    { return ZTS_ERR_SERVICE; }
+int zts_init_allow_tcp_relay(int)                { return ZTS_ERR_SERVICE; }

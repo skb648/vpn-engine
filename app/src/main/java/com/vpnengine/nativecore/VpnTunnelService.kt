@@ -10,6 +10,7 @@ import android.net.NetworkRequest
 import android.net.VpnService as AndroidVpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
 import android.util.Log
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
@@ -86,6 +87,7 @@ class VpnTunnelService : AndroidVpnService() {
     private var tunEstablished = false
     private var socks5Proxy: Socks5ProxyServer? = null
     private var tunSocksBridge: TunSocksBridge? = null
+    private var loopbackGateway: LocalLoopbackGateway? = null
     private var currentMode = VpnStateHolder.VpnMode.RECEIVER
     private var currentNetworkId = 0L
     private var retryJob: Job? = null
@@ -93,6 +95,38 @@ class VpnTunnelService : AndroidVpnService() {
     // Track the bound network so we can unbind properly during teardown
     @Volatile
     private var boundNetwork: Network? = null
+
+    // Wake lock to keep CPU alive while VPN is running.
+    // Without this, the ZeroTier SDK background threads can be suspended
+    // during deep sleep, which kills UDP hole-punching and the heartbeat
+    // packets that keep the device visible on ZeroTier Central.
+    @Volatile
+    private var wakeLock: PowerManager.WakeLock? = null
+
+    private fun acquireWakeLockIfNeeded() {
+        if (wakeLock?.isHeld == true) return
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VpnEngine::ZtMeshWakeLock")
+            wl.setReferenceCounted(false)
+            wl.acquire(/* timeout = */ 24L * 60L * 60L * 1000L) // 24 hours safety cap
+            wakeLock = wl
+            Log.i(TAG, "Acquired PARTIAL_WAKE_LOCK to keep ZT SDK alive in deep sleep")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to acquire wake lock — connectivity may drop during deep sleep", e)
+        }
+    }
+
+    private fun releaseWakeLockIfHeld() {
+        try {
+            wakeLock?.let { wl ->
+                if (wl.isHeld) wl.release()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to release wake lock", e)
+        }
+        wakeLock = null
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "onStartCommand: action=${intent?.action}")
@@ -157,7 +191,9 @@ class VpnTunnelService : AndroidVpnService() {
         stopEngineAndTun()
         stopSocks5Proxy()
         stopTunSocksBridge()
+        stopLoopbackGateway()
         unbindProcessNetwork()
+        releaseWakeLockIfHeld()
         ZtEngine.vpnServiceRef = null
         ZtEngine.fatalErrorHandler = null
         super.onDestroy()
@@ -206,6 +242,12 @@ class VpnTunnelService : AndroidVpnService() {
                 attemptReconnect(networkId, mode)
             }
         }
+
+        // ── PHASE 0a: Acquire wake lock so the SDK threads stay alive ───────
+        // Without a partial wake lock, Doze mode and deep sleep will suspend
+        // our UDP keepalives and the device will silently disappear from the
+        // ZeroTier Central dashboard.
+        acquireWakeLockIfNeeded()
 
         // ── PHASE 0: Show foreground notification FIRST (Android 8+ requirement) ──
         VpnStateHolder.updateState(VpnState.InitializingNode)
@@ -653,6 +695,7 @@ class VpnTunnelService : AndroidVpnService() {
 
         socks5Proxy = proxy
         VpnStateHolder.updateSenderProxyConfig(assignedIP, 1080)
+        startLoopbackGatewayIfPossible()
         VpnStateHolder.updateState(VpnState.Connected())
         VpnNotificationHelper.updateNotification(this, "SOCKS5 proxy active on $assignedIP:1080")
         Log.i(TAG, "SENDER mode active: SOCKS5 proxy on $assignedIP:1080")
@@ -760,6 +803,7 @@ class VpnTunnelService : AndroidVpnService() {
             startRawTunBridge(tunFd)
         }
 
+        startLoopbackGatewayIfPossible()
         VpnStateHolder.updateState(VpnState.Connected())
         VpnNotificationHelper.updateNotification(this, "P2P Mesh VPN active")
         Log.i(TAG, "TUN bridge started — VPN tunnel is active")
@@ -814,7 +858,9 @@ class VpnTunnelService : AndroidVpnService() {
         stopEngineAndTun()
         stopSocks5Proxy()
         stopTunSocksBridge()
+        stopLoopbackGateway()
         unbindProcessNetwork()
+        releaseWakeLockIfHeld()
         VpnStateHolder.reset()
         stopForegroundAndNotification()
         stopSelf()
@@ -982,6 +1028,32 @@ class VpnTunnelService : AndroidVpnService() {
         vpnInterface = null
         tunEstablished = false
         VpnStateHolder.updateAssignedIP("", "")
+    }
+
+    /**
+     * Start the embedded application-layer loopback gateway on 127.0.0.1:1080.
+     * This is started best-effort — failure is logged but does not stop the VPN.
+     */
+    private fun startLoopbackGatewayIfPossible() {
+        if (loopbackGateway?.isRunning == true) return
+        try {
+            val gw = LocalLoopbackGateway(LocalLoopbackGateway.DEFAULT_PORT)
+            if (gw.start()) {
+                loopbackGateway = gw
+                Log.i(TAG, "Embedded loopback gateway active on 127.0.0.1:${LocalLoopbackGateway.DEFAULT_PORT}")
+            } else {
+                Log.w(TAG, "Loopback gateway failed to bind — feature disabled")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not start loopback gateway", e)
+        }
+    }
+
+    private fun stopLoopbackGateway() {
+        try { loopbackGateway?.stop() } catch (e: Exception) {
+            Log.w(TAG, "Error stopping loopback gateway", e)
+        }
+        loopbackGateway = null
     }
 
     private fun stopSocks5Proxy() {

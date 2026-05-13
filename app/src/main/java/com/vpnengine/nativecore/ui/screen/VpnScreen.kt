@@ -75,11 +75,20 @@ fun VpnScreen(
                         ztNodeId = formatted
                     }
                 } else {
+                    // ── Cryptographic identity reader ─────────────────────
+                    // The ZeroTier identity.public file has the canonical form:
+                    //   <10-hex-node-id>:0:<hex public key>
+                    // We split on ':' and take the first segment so any leading
+                    // whitespace, BOM, or trailing newline is handled robustly.
                     val f = java.io.File(ctx.filesDir, "zerotier/identity.public")
-                    if (f.exists()) {
-                        val idText = f.readText()
-                        if (idText.length >= 10) {
-                            val formatted = idText.take(10)
+                    if (f.exists() && f.canRead()) {
+                        val idText = f.readText().trim()
+                        val firstSegment = idText.substringBefore(':').trim()
+                        val hexNodeId = firstSegment
+                            .lowercase()
+                            .filter { it in '0'..'9' || it in 'a'..'f' }
+                        if (hexNodeId.length >= 10) {
+                            val formatted = hexNodeId.take(10)
                             if (formatted != ztNodeId) {
                                 ztNodeId = formatted
                             }
