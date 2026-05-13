@@ -21,6 +21,12 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+# CRITICAL: Explicit permissions required for upload-artifact@v4
+# Without these, artifacts may silently fail to upload on some repos
+permissions:
+  contents: read
+  actions: write
+
 # Cancel in-progress runs for the same branch
 concurrency:
   group: build-${{ github.ref }}
