@@ -136,13 +136,26 @@ jobs:
           echo "=== Debug APK Output ==="
           find app/build/outputs/apk/debug/ -name "*.apk" -exec ls -lh {} \; 2>/dev/null || echo "No debug APK found"
 
-      # ── 9. Upload Debug APK ─────────────────────────────────────────────
+      # ── 9. Verify & Upload Debug APK ──────────────────────────────────
+      - name: Verify Debug APK exists
+        run: |
+          echo "Checking for debug APK..."
+          ls -lh app/build/outputs/apk/debug/ 2>/dev/null || echo "Debug APK directory not found"
+          if ls app/build/outputs/apk/debug/*.apk 1>/dev/null 2>&1; then
+            echo "✅ Debug APK found!"
+            ls -lh app/build/outputs/apk/debug/*.apk
+          else
+            echo "❌ Debug APK NOT found — checking build output..."
+            ls -lhR app/build/outputs/ 2>/dev/null || echo "No outputs directory"
+          fi
+
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: vpn-engine-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
           retention-days: 30
 
       # ── 10. Build Release APK ───────────────────────────────────────────
@@ -155,13 +168,26 @@ jobs:
           echo "=== Release APK Output ==="
           find app/build/outputs/apk/release/ -name "*.apk" -exec ls -lh {} \; 2>/dev/null || echo "No release APK found"
 
-      # ── 11. Upload Release APK ──────────────────────────────────────────
+      # ── 11. Verify & Upload Release APK ────────────────────────────────
+      - name: Verify Release APK exists
+        run: |
+          echo "Checking for release APK..."
+          ls -lh app/build/outputs/apk/release/ 2>/dev/null || echo "Release APK directory not found"
+          if ls app/build/outputs/apk/release/*.apk 1>/dev/null 2>&1; then
+            echo "✅ Release APK found!"
+            ls -lh app/build/outputs/apk/release/*.apk
+          else
+            echo "❌ Release APK NOT found — checking build output..."
+            ls -lhR app/build/outputs/ 2>/dev/null || echo "No outputs directory"
+          fi
+
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: vpn-engine-release-apk
           path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: warn
           retention-days: 30
 
       # ── 12. Build Summary ───────────────────────────────────────────────
