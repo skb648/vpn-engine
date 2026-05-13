@@ -34,6 +34,7 @@
 #include <memory>
 
 #include "ZeroTierEngine.h"
+#include "Socks5Server.h"
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Logging
@@ -51,6 +52,10 @@
 
 static std::unique_ptr<ZeroTierEngine> g_engine;
 static std::mutex g_engineMutex;
+
+// Native SOCKS5 server (SENDER mode) — runs on libzt's user-space stack.
+static std::unique_ptr<Socks5Server> g_socks5;
+static std::mutex g_socks5Mutex;
 
 // ── JNI callback fields ─────────────────────────────────────────────────────
 static JavaVM*     g_jvm{nullptr};
@@ -580,6 +585,78 @@ Java_com_vpnengine_nativecore_ZtEngine_nativeReadPacket(
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// SOCKS5 native server — bound to libzt's user-space stack (SENDER mode)
+// ══════════════════════════════════════════════════════════════════════════════
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_vpnengine_nativecore_ZtEngine_nativeStartSocks5(
+        JNIEnv* env, jobject /*thiz*/, jstring bindIp, jint port)
+{
+    try {
+        const char* ipCstr = bindIp ? env->GetStringUTFChars(bindIp, nullptr) : nullptr;
+        std::string ip = ipCstr ? ipCstr : "0.0.0.0";
+        if (ipCstr) env->ReleaseStringUTFChars(bindIp, ipCstr);
+
+        std::lock_guard<std::mutex> lock(g_socks5Mutex);
+        if (g_socks5 && g_socks5->isRunning()) {
+            LOG_I("SOCKS5 native already running");
+            return JNI_TRUE;
+        }
+        g_socks5 = std::make_unique<Socks5Server>();
+        bool ok = g_socks5->start(ip, static_cast<uint16_t>(port),
+                                  [](int fd) -> bool {
+                                      return callOnZtSocketCreated(fd);
+                                  });
+        if (!ok) {
+            LOG_E("SOCKS5 start failed: %s", g_socks5->lastError().c_str());
+            g_socks5.reset();
+            return JNI_FALSE;
+        }
+        return JNI_TRUE;
+    } catch (const std::exception& e) {
+        LOG_E("nativeStartSocks5 exception: %s", e.what());
+        return JNI_FALSE;
+    } catch (...) {
+        LOG_E("nativeStartSocks5 unknown exception");
+        return JNI_FALSE;
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_vpnengine_nativecore_ZtEngine_nativeStopSocks5(
+        JNIEnv* /*env*/, jobject /*thiz*/)
+{
+    try {
+        std::lock_guard<std::mutex> lock(g_socks5Mutex);
+        if (g_socks5) {
+            g_socks5->stop();
+            g_socks5.reset();
+        }
+    } catch (const std::exception& e) {
+        LOG_E("nativeStopSocks5 exception: %s", e.what());
+    } catch (...) {
+        LOG_E("nativeStopSocks5 unknown exception");
+    }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_vpnengine_nativecore_ZtEngine_nativeIsSocks5Running(
+        JNIEnv* /*env*/, jobject /*thiz*/)
+{
+    std::lock_guard<std::mutex> lock(g_socks5Mutex);
+    return (g_socks5 && g_socks5->isRunning()) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_vpnengine_nativecore_ZtEngine_nativeGetSocks5Error(
+        JNIEnv* env, jobject /*thiz*/)
+{
+    std::lock_guard<std::mutex> lock(g_socks5Mutex);
+    std::string err = g_socks5 ? g_socks5->lastError() : std::string("Server not initialized");
+    return env->NewStringUTF(err.c_str());
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // JNI_OnLoad — Cache JavaVM* and Kotlin callback method IDs
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -678,6 +755,14 @@ JNI_OnUnload(JavaVM* vm, void* /* reserved */)
 {
     LOG_I("JNI_OnUnload — cleaning up");
     g_jniShuttingDown.store(true, std::memory_order_release);
+
+    try {
+        std::lock_guard<std::mutex> lock(g_socks5Mutex);
+        if (g_socks5) {
+            g_socks5->stop();
+            g_socks5.reset();
+        }
+    } catch (...) {}
 
     try {
         std::lock_guard<std::mutex> lock(g_engineMutex);
