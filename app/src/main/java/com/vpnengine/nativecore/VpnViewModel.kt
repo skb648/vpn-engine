@@ -83,6 +83,12 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     val senderProxyPort: StateFlow<Int> = VpnStateHolder.senderProxyPort
     val socks5ProxyRunning: StateFlow<Boolean> = VpnStateHolder.socks5ProxyRunning
 
+    // ── Exit Node Configuration ────────────────────────────────────────────
+
+    val exitNodeAddress: StateFlow<String> = VpnStateHolder.exitNodeAddress
+    val exitNodePort: StateFlow<Int> = VpnStateHolder.exitNodePort
+    val tunSocksBridgeRunning: StateFlow<Boolean> = VpnStateHolder.tunSocksBridgeRunning
+
     // ── Events ─────────────────────────────────────────────────────────────
 
     private val _permissionEvent = MutableSharedFlow<Intent>(extraBufferCapacity = 1)
@@ -194,6 +200,32 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
         VpnStateHolder.updateMode(mode)
         Log.i(TAG, "Mode changed to: $mode")
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Exit Node Configuration
+    // ══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Set the exit node (Sender) SOCKS5 proxy address for RECEIVER full tunneling.
+     * This is the ZeroTier virtual IP of the peer that will act as the internet gateway.
+     *
+     * @param address The Sender's ZeroTier virtual IP (e.g., "10.147.20.5")
+     * @param port The Sender's SOCKS5 proxy port (default 1080)
+     */
+    fun updateExitNode(address: String, port: Int = 1080) {
+        val trimmed = address.trim()
+        VpnStateHolder.updateExitNodeConfig(trimmed, port)
+        Log.i(TAG, "Exit node configured: $trimmed:$port")
+    }
+
+    /**
+     * Clear the exit node configuration.
+     * RECEIVER mode will fall back to raw TUN-ZT bridge.
+     */
+    fun clearExitNode() {
+        VpnStateHolder.updateExitNodeConfig("", 1080)
+        Log.i(TAG, "Exit node configuration cleared")
     }
 
     // ══════════════════════════════════════════════════════════════════════

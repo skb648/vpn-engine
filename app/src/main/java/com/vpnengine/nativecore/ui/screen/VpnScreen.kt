@@ -35,6 +35,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.BorderStroke
 import com.vpnengine.nativecore.AuthorizationStatus
 import com.vpnengine.nativecore.VpnState
 import com.vpnengine.nativecore.VpnStateHolder
@@ -108,6 +109,8 @@ fun VpnScreen(
     val mode by viewModel.mode.collectAsState()
     val senderProxyAddress by viewModel.senderProxyAddress.collectAsState()
     val senderProxyPort by viewModel.senderProxyPort.collectAsState()
+    val exitNodeAddress by viewModel.exitNodeAddress.collectAsState()
+    val exitNodePort by viewModel.exitNodePort.collectAsState()
     val apiToken by viewModel.apiToken.collectAsState()
     val authStatus by viewModel.authStatus.collectAsState()
 
@@ -367,7 +370,9 @@ fun VpnScreen(
                             assignedIPv4 = assignedIPv4,
                             networkId = networkIdDisplay,
                             nodeId = nodeId,
-                            trafficStats = trafficStats
+                            trafficStats = trafficStats,
+                            exitNodeAddress = exitNodeAddress,
+                            exitNodePort = exitNodePort
                         )
                     }
                 }
@@ -394,6 +399,18 @@ fun VpnScreen(
                             vpnState is VpnState.JoiningMesh ||
                             vpnState is VpnState.Connected
                 )
+
+                // ── Exit Node Configuration (RECEIVER mode) ─────────────
+                if (mode == VpnStateHolder.VpnMode.RECEIVER) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    ExitNodeConfigPanel(
+                        exitNodeAddress = exitNodeAddress,
+                        exitNodePort = exitNodePort,
+                        onExitNodeChange = { addr, port -> viewModel.updateExitNode(addr, port) },
+                        onClearExitNode = { viewModel.clearExitNode() },
+                        isEditing = vpnState is VpnState.Disconnected || vpnState is VpnState.Error
+                    )
+                }
             }
         }
     }
@@ -856,7 +873,9 @@ fun MeshDetailsPanel(
     assignedIPv4: String,
     networkId: String,
     nodeId: Long,
-    trafficStats: VpnStateHolder.TrafficStats
+    trafficStats: VpnStateHolder.TrafficStats,
+    exitNodeAddress: String = "",
+    exitNodePort: Int = 1080
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -876,7 +895,7 @@ fun MeshDetailsPanel(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "Mesh Connection",
+                    text = if (exitNodeAddress.isNotBlank()) "Exit Node Tunnel" else "Mesh Connection",
                     style = MaterialTheme.typography.titleMedium.copy(
                         fontWeight = FontWeight.Bold,
                         fontFamily = FontFamily.Monospace
@@ -888,6 +907,10 @@ fun MeshDetailsPanel(
             HorizontalDivider(color = Color(0xFF1F2937))
 
             DetailRow("Virtual IP", assignedIPv4.ifBlank { "—" })
+            if (exitNodeAddress.isNotBlank()) {
+                DetailRow("Exit Node", "$exitNodeAddress:$exitNodePort")
+                DetailRow("Bridge Mode", "TUN-SOCKS5 (Full Tunnel)")
+            }
             DetailRow("Network ID", networkId)
             if (nodeId != 0L) {
                 DetailRow("Node ID", String.format(java.util.Locale.US, "%010x", nodeId))
@@ -1280,4 +1303,161 @@ private fun formatBytes(bytes: Long): String {
     if (bytes < 1024 * 1024) return String.format(java.util.Locale.US, "%.1f KB", bytes / 1024.0)
     if (bytes < 1024 * 1024 * 1024) return String.format(java.util.Locale.US, "%.1f MB", bytes / (1024.0 * 1024))
     return String.format(java.util.Locale.US, "%.1f GB", bytes / (1024.0 * 1024 * 1024))
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Exit Node Configuration Panel (RECEIVER Full Tunneling)
+// ══════════════════════════════════════════════════════════════════════════════
+
+@Composable
+fun ExitNodeConfigPanel(
+    exitNodeAddress: String,
+    exitNodePort: Int,
+    onExitNodeChange: (String, Int) -> Unit,
+    onClearExitNode: () -> Unit,
+    isEditing: Boolean
+) {
+    var addressInput by remember(exitNodeAddress) { mutableStateOf(exitNodeAddress) }
+    var portInput by remember(exitNodePort) { mutableStateOf(exitNodePort.toString()) }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        color = Color(0xFF111827).copy(alpha = 0.8f)
+    ) {
+        Column(
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Rounded.Language,
+                    contentDescription = null,
+                    tint = CyberGreen,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Exit Node (Internet Gateway)",
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    ),
+                    color = CyberGreen
+                )
+            }
+
+            HorizontalDivider(color = Color(0xFF1F2937))
+
+            Text(
+                text = "Configure a Sender peer's ZeroTier IP as your exit node. " +
+                        "All traffic will be routed through this peer's SOCKS5 proxy via the ZeroTier network.",
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontFamily = FontFamily.Monospace,
+                    color = Color(0xFF9CA3AF)
+                )
+            )
+
+            // Exit Node IP Address
+            OutlinedTextField(
+                value = addressInput,
+                onValueChange = { addressInput = it },
+                label = { Text("Exit Node IP", fontFamily = FontFamily.Monospace) },
+                placeholder = { Text("e.g., 10.147.20.5", fontFamily = FontFamily.Monospace, color = Color(0xFF4B5563)) },
+                enabled = isEditing,
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = CyberGreen,
+                    unfocusedBorderColor = Color(0xFF374151),
+                    disabledBorderColor = Color(0xFF1F2937),
+                    focusedLabelColor = CyberGreen,
+                    unfocusedLabelColor = Color(0xFF6B7280),
+                    cursorColor = CyberGreen
+                )
+            )
+
+            // Exit Node Port
+            OutlinedTextField(
+                value = portInput,
+                onValueChange = {
+                    portInput = it.filter { c -> c.isDigit() }
+                    val port = portInput.toIntOrNull() ?: 1080
+                    if (port in 1..65535) {
+                        onExitNodeChange(addressInput, port)
+                    }
+                },
+                label = { Text("Port", fontFamily = FontFamily.Monospace) },
+                enabled = isEditing,
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(0.4f),
+                textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = CyberGreen,
+                    unfocusedBorderColor = Color(0xFF374151),
+                    disabledBorderColor = Color(0xFF1F2937),
+                    focusedLabelColor = CyberGreen,
+                    unfocusedLabelColor = Color(0xFF6B7280),
+                    cursorColor = CyberGreen
+                )
+            )
+
+            // Apply button
+            if (isEditing) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            val port = portInput.toIntOrNull() ?: 1080
+                            onExitNodeChange(addressInput.trim(), port.coerceIn(1, 65535))
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = CyberGreen),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Apply", fontFamily = FontFamily.Monospace, color = Color.Black)
+                    }
+
+                    if (exitNodeAddress.isNotBlank()) {
+                        OutlinedButton(
+                            onClick = {
+                                addressInput = ""
+                                portInput = "1080"
+                                onClearExitNode()
+                            },
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.dp, Color(0xFFEF4444)),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFEF4444))
+                        ) {
+                            Text("Clear", fontFamily = FontFamily.Monospace)
+                        }
+                    }
+                }
+            }
+
+            // Status indicator
+            if (exitNodeAddress.isNotBlank()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Canvas(modifier = Modifier.size(8.dp)) {
+                        drawCircle(color = CyberGreen)
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Full tunneling via $exitNodeAddress:$exitNodePort",
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                        color = CyberGreen
+                    )
+                }
+            } else {
+                Text(
+                    text = "No exit node configured — using direct P2P mesh mode",
+                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                    color = Color(0xFF6B7280)
+                )
+            }
+        }
+    }
 }

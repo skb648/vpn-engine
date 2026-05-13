@@ -85,6 +85,7 @@ class VpnTunnelService : AndroidVpnService() {
     private var commandJob: Job? = null
     private var tunEstablished = false
     private var socks5Proxy: Socks5ProxyServer? = null
+    private var tunSocksBridge: TunSocksBridge? = null
     private var currentMode = VpnStateHolder.VpnMode.RECEIVER
     private var currentNetworkId = 0L
     private var retryJob: Job? = null
@@ -155,6 +156,7 @@ class VpnTunnelService : AndroidVpnService() {
         serviceScope.cancel()
         stopEngineAndTun()
         stopSocks5Proxy()
+        stopTunSocksBridge()
         unbindProcessNetwork()
         ZtEngine.vpnServiceRef = null
         ZtEngine.fatalErrorHandler = null
@@ -675,6 +677,23 @@ class VpnTunnelService : AndroidVpnService() {
 
     /**
      * RECEIVER MODE: Establish TUN interface and bridge traffic.
+     *
+     * HYBRID ROUTING ARCHITECTURE (Exit Node / Full Tunneling):
+     *
+     * In RECEIVER mode, we support two bridge modes:
+     *   1. TUN-SOCKS5 Bridge (Full Tunneling via Exit Node):
+     *      - TUN → Packet Parser → SOCKS5 via ZT Socket → Sender's Proxy → Internet
+     *      - Routes TCP connections through a SOCKS5 proxy chain
+     *      - UDP forwarded through C++ ZT raw socket bridge
+     *      - Requires exit node (Sender) SOCKS5 proxy address
+     *
+     *   2. Raw TUN-ZT Bridge (Direct P2P Mesh):
+     *      - TUN → Raw IP Packets → ZT Raw Socket → ZeroTier Network
+     *      - For direct ZeroTier network access without exit node
+     *      - Used when no exit node address is configured
+     *
+     * The bridge mode is selected automatically based on whether an
+     * exit node address is configured in VpnStateHolder.
      */
     private suspend fun setupReceiverMode(assignedIP: String) {
         Log.i(TAG, "RECEIVER mode: Building TUN interface with IP: $assignedIP")
@@ -706,16 +725,39 @@ class VpnTunnelService : AndroidVpnService() {
         val tunFd = pfd.fd
         Log.i(TAG, "TUN established: fd=$tunFd, mtu=$TUNNEL_MTU, ip=$assignedIP")
 
-        val bridgeStarted = ZtEngine.startTunBridgeSafe(tunFd)
-        if (!bridgeStarted) {
-            val nativeErr = ZtEngine.getLastErrorSafe()
-            Log.e(TAG, "Failed to start TUN bridge: $nativeErr")
-            VpnStateHolder.updateState(VpnState.Error("Failed to start packet bridge: $nativeErr"))
-            stopEngineAndTun()
-            unbindProcessNetwork()
-            stopForegroundAndNotification()
-            stopSelf()
-            return
+        // ══════════════════════════════════════════════════════════════════════
+        // BRIDGE MODE SELECTION — Automatic hybrid routing
+        // ══════════════════════════════════════════════════════════════════════
+        //
+        // If an exit node address is configured, use the TUN-SOCKS5 bridge
+        // for full tunneling. Otherwise, fall back to the raw TUN-ZT bridge
+        // for direct P2P mesh access.
+
+        val exitNodeAddr = VpnStateHolder.exitNodeAddress.value
+
+        if (exitNodeAddr.isNotBlank()) {
+            // ── MODE 1: TUN-SOCKS5 Bridge (Full Tunneling via Exit Node) ──
+            Log.i(TAG, "RECEIVER mode: Starting TUN-SOCKS5 bridge to exit node $exitNodeAddr")
+            VpnNotificationHelper.updateNotification(this, "Starting exit node bridge...")
+
+            val bridge = TunSocksBridge(this, pfd)
+            val exitNodePort = VpnStateHolder.exitNodePort.value
+            val bridgeStarted = bridge.start(exitNodeAddr, exitNodePort)
+
+            if (!bridgeStarted) {
+                Log.e(TAG, "Failed to start TUN-SOCKS5 bridge — falling back to raw bridge")
+                VpnNotificationHelper.updateNotification(this, "Fallback: raw bridge mode")
+                startRawTunBridge(tunFd)
+            } else {
+                tunSocksBridge = bridge
+                VpnStateHolder.updateTunSocksBridgeRunning(true)
+                Log.i(TAG, "TUN-SOCKS5 bridge started — full tunneling via exit node $exitNodeAddr:$exitNodePort")
+            }
+        } else {
+            // ── MODE 2: Raw TUN-ZT Bridge (Direct P2P Mesh) ──
+            Log.i(TAG, "RECEIVER mode: No exit node configured — using raw TUN-ZT bridge")
+            VpnNotificationHelper.updateNotification(this, "Starting P2P mesh bridge...")
+            startRawTunBridge(tunFd)
         }
 
         VpnStateHolder.updateState(VpnState.Connected())
@@ -732,6 +774,34 @@ class VpnTunnelService : AndroidVpnService() {
         monitorEngineHealth()
     }
 
+    /**
+     * Start the raw TUN-ZT bridge using the C++ engine.
+     * Used when no exit node is configured for full tunneling.
+     */
+    private fun startRawTunBridge(tunFd: Int) {
+        val bridgeStarted = ZtEngine.startTunBridgeSafe(tunFd)
+        if (!bridgeStarted) {
+            val nativeErr = ZtEngine.getLastErrorSafe()
+            Log.e(TAG, "Failed to start raw TUN bridge: $nativeErr")
+            VpnStateHolder.updateState(VpnState.Error("Failed to start packet bridge: $nativeErr"))
+            stopEngineAndTun()
+            unbindProcessNetwork()
+            stopForegroundAndNotification()
+            stopSelf()
+            return
+        }
+        Log.i(TAG, "Raw TUN-ZT bridge started")
+    }
+
+    /**
+     * Stop the TUN-SOCKS5 bridge if it's running.
+     */
+    private fun stopTunSocksBridge() {
+        tunSocksBridge?.stop()
+        tunSocksBridge = null
+        VpnStateHolder.updateTunSocksBridgeRunning(false)
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // STOP / TEARDOWN — Coordinated, crash-free shutdown
     // ══════════════════════════════════════════════════════════════════════════
@@ -743,6 +813,7 @@ class VpnTunnelService : AndroidVpnService() {
         ZtEngine.fatalErrorHandler = null
         stopEngineAndTun()
         stopSocks5Proxy()
+        stopTunSocksBridge()
         unbindProcessNetwork()
         VpnStateHolder.reset()
         stopForegroundAndNotification()

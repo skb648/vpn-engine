@@ -103,6 +103,21 @@ object ZtEngine {
     external fun nativeGetAddress(index: Long): String?
     external fun nativeZtsTcpConnect(destIP: String, destPort: Int): Int
 
+    // ── Native fd I/O methods for SOCKS5 proxy bridge ────────────────────
+    // These methods operate on raw file descriptors returned by
+    // ztsTcpConnect(). They enable the Kotlin SOCKS5 client to
+    // read/write through ZeroTier sockets without creating Java Socket
+    // objects (which is not possible from raw ZT file descriptors).
+
+    /** Write data to a native file descriptor (ZT socket). Returns bytes written or -1 on error. */
+    external fun nativeSendToFd(fd: Int, data: ByteArray, length: Int): Int
+
+    /** Read data from a native file descriptor (ZT socket). Returns bytes read or -1 on error. */
+    external fun nativeRecvFromFd(fd: Int, buffer: ByteArray, capacity: Int): Int
+
+    /** Close a native file descriptor (ZT socket). */
+    external fun nativeCloseFd(fd: Int)
+
     // Note: nativeJoinNetwork and nativeLeaveNetwork are already declared
     // in the native library via native-lib.cpp lines 363-387.
 
@@ -239,6 +254,27 @@ object ZtEngine {
         return try { nativeZtsTcpConnect(destIP, destPort) }
         catch (e: Exception) { Log.e(TAG, "ztsTcpConnect failed", e); -1 }
         catch (e: Error) { Log.e(TAG, "ztsTcpConnect error", e); -1 }
+    }
+
+    fun sendToFd(fd: Int, data: ByteArray, length: Int): Int {
+        if (!nativeLibraryLoaded) return -1
+        return try { nativeSendToFd(fd, data, length) }
+        catch (e: Exception) { Log.e(TAG, "sendToFd failed", e); -1 }
+        catch (e: Error) { Log.e(TAG, "sendToFd error", e); -1 }
+    }
+
+    fun recvFromFd(fd: Int, buffer: ByteArray, capacity: Int): Int {
+        if (!nativeLibraryLoaded) return -1
+        return try { nativeRecvFromFd(fd, buffer, capacity) }
+        catch (e: Exception) { Log.e(TAG, "recvFromFd failed", e); -1 }
+        catch (e: Error) { Log.e(TAG, "recvFromFd error", e); -1 }
+    }
+
+    fun closeFd(fd: Int) {
+        if (!nativeLibraryLoaded) return
+        try { nativeCloseFd(fd) }
+        catch (e: Exception) { Log.e(TAG, "closeFd failed", e) }
+        catch (e: Error) { Log.e(TAG, "closeFd error", e) }
     }
 
     // ══════════════════════════════════════════════════════════════════════

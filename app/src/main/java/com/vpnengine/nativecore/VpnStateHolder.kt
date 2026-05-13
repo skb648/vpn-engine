@@ -87,6 +87,20 @@ object VpnStateHolder {
     private val _socks5ProxyRunning = MutableStateFlow(false)
     val socks5ProxyRunning: StateFlow<Boolean> = _socks5ProxyRunning.asStateFlow()
 
+    // ── Exit Node Configuration (for RECEIVER full tunneling) ─────────────
+
+    /** Exit node (Sender) ZeroTier virtual IP address */
+    private val _exitNodeAddress = MutableStateFlow("")
+    val exitNodeAddress: StateFlow<String> = _exitNodeAddress.asStateFlow()
+
+    /** Exit node SOCKS5 proxy port */
+    private val _exitNodePort = MutableStateFlow(1080)
+    val exitNodePort: StateFlow<Int> = _exitNodePort.asStateFlow()
+
+    /** Whether the TUN-SOCKS bridge is active (RECEIVER full tunneling) */
+    private val _tunSocksBridgeRunning = MutableStateFlow(false)
+    val tunSocksBridgeRunning: StateFlow<Boolean> = _tunSocksBridgeRunning.asStateFlow()
+
     // ── Update Methods ──────────────────────────────────────────────────────
 
     fun updateState(state: VpnState) {
@@ -142,6 +156,15 @@ object VpnStateHolder {
         _socks5ProxyRunning.value = running
     }
 
+    fun updateExitNodeConfig(address: String, port: Int = 1080) {
+        _exitNodeAddress.value = address
+        _exitNodePort.value = port
+    }
+
+    fun updateTunSocksBridgeRunning(running: Boolean) {
+        _tunSocksBridgeRunning.value = running
+    }
+
     fun reset() {
         _vpnState.value = VpnState.Disconnected
         _assignedIPv4.value = ""
@@ -150,8 +173,10 @@ object VpnStateHolder {
         _nodeId.value = 0L
         _nodeIdString.value = ""
         _socks5ProxyRunning.value = false
+        _tunSocksBridgeRunning.value = false
         _senderProxyAddress.value = ""
         _senderProxyPort.value = 1080
+        // NOTE: exit node config is NOT reset — user preference persists
         // NOTE: _mode is NOT reset — user preference persists across connections
     }
 }

@@ -32,6 +32,7 @@
 #include <atomic>
 #include <mutex>
 #include <memory>
+#include <vector>
 
 #include "ZeroTierEngine.h"
 
@@ -577,6 +578,122 @@ Java_com_vpnengine_nativecore_ZtEngine_nativeReadPacket(
     // TUN packet reading is handled internally by the engine's tunBridge thread
     // This stub returns 0 to indicate no packet available via this path
     return 0;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Native fd I/O — Read/Write/Close for SOCKS5 proxy bridge
+//
+// These methods operate on raw file descriptors returned by
+// ztsTcpConnect(). They enable the Kotlin SOCKS5 client to
+// read/write through ZeroTier sockets without creating Java Socket
+// objects (which is not possible from raw ZT file descriptors).
+// ══════════════════════════════════════════════════════════════════════════════
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_vpnengine_nativecore_ZtEngine_nativeSendToFd(
+        JNIEnv* env, jobject /*thiz*/, jint fd, jbyteArray data, jint length)
+{
+    try {
+        if (fd < 0 || !data || length <= 0) {
+            LOG_W("nativeSendToFd: invalid args (fd=%d, data=%p, len=%d)",
+                  fd, data ? "non-null" : "null", length);
+            return -1;
+        }
+
+        jbyte* buf = env->GetByteArrayElements(data, nullptr);
+        if (!buf) {
+            LOG_E("nativeSendToFd: GetByteArrayElements failed");
+            return -1;
+        }
+
+        ssize_t sent = write(fd, buf, length);
+        int writeErr = (sent < 0) ? errno : 0;
+
+        env->ReleaseByteArrayElements(data, buf, JNI_ABORT);
+
+        if (sent < 0) {
+            if (writeErr == EAGAIN || writeErr == EWOULDBLOCK) {
+                return 0;  // Non-blocking, no data sent yet
+            }
+            LOG_W("nativeSendToFd: write(%d) failed: %s", fd, std::strerror(writeErr));
+            return -1;
+        }
+
+        return static_cast<jint>(sent);
+
+    } catch (const std::exception& e) {
+        LOG_E("nativeSendToFd exception: %s", e.what());
+        return -1;
+    } catch (...) {
+        LOG_E("nativeSendToFd unknown exception");
+        return -1;
+    }
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_vpnengine_nativecore_ZtEngine_nativeRecvFromFd(
+        JNIEnv* env, jobject /*thiz*/, jint fd, jbyteArray buffer, jint capacity)
+{
+    try {
+        if (fd < 0 || !buffer || capacity <= 0) {
+            LOG_W("nativeRecvFromFd: invalid args (fd=%d, buf=%p, cap=%d)",
+                  fd, buffer ? "non-null" : "null", capacity);
+            return -1;
+        }
+
+        // Allocate a temporary buffer for the read
+        std::vector<uint8_t> tmpBuf(capacity);
+
+        ssize_t bytesRead = read(fd, tmpBuf.data(), capacity);
+
+        if (bytesRead < 0) {
+            int readErr = errno;
+            if (readErr == EAGAIN || readErr == EWOULDBLOCK) {
+                return 0;  // Non-blocking, no data available yet
+            }
+            LOG_W("nativeRecvFromFd: read(%d) failed: %s", fd, std::strerror(readErr));
+            return -1;
+        }
+
+        if (bytesRead == 0) {
+            // EOF — connection closed by peer
+            return -1;
+        }
+
+        // Copy the read data into the Java byte array
+        env->SetByteArrayRegion(buffer, 0, static_cast<jsize>(bytesRead),
+                                reinterpret_cast<jbyte*>(tmpBuf.data()));
+
+        return static_cast<jint>(bytesRead);
+
+    } catch (const std::exception& e) {
+        LOG_E("nativeRecvFromFd exception: %s", e.what());
+        return -1;
+    } catch (...) {
+        LOG_E("nativeRecvFromFd unknown exception");
+        return -1;
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_vpnengine_nativecore_ZtEngine_nativeCloseFd(
+        JNIEnv* /*env*/, jobject /*thiz*/, jint fd)
+{
+    try {
+        if (fd < 0) return;
+
+        // Try ZT close first (for ZT socket fds)
+        int rc = zts_close(fd);
+        if (rc != ZTS_ERR_OK) {
+            // Not a ZT socket — try regular close
+            close(fd);
+        }
+
+        LOG_D("nativeCloseFd: fd=%d closed", fd);
+    } catch (...) {
+        // Suppress all exceptions during close
+        try { close(fd); } catch (...) {}
+    }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
